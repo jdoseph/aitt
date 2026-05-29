@@ -1,0 +1,62 @@
+[project]
+name = "ai-infra-tracker"
+version = "0.1.0"
+description = "Background agent + dashboard tracking AI data-center value-chain stocks across four entry strategies"
+readme = "README.md"
+# pandas-ta 0.4.x requires Python >=3.12.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # --- market data ---
+    "yfinance>=0.2.40",
+    # --- numerics / TA ---
+    # pandas-ta 0.4.71b0 is the maintained rewrite: no more `numpy.NaN`, needs numpy>=2.2.6.
+    "numpy>=2.2.6",
+    "pandas>=2.2,<3",
+    "pandas-ta>=0.4.71b0",
+    # pandas-ta candlestick functions wrap TA-Lib. The `ta-lib` PyPI package
+    # ships prebuilt wheels (incl. Windows cp312) from 0.6.0 onward.
+    "TA-Lib>=0.6.0",
+    # --- persistence / config ---
+    "sqlmodel>=0.0.21",
+    "pydantic-settings>=2.4",
+    "PyYAML>=6.0",
+    # --- scheduling / notifications ---
+    "apscheduler>=3.10,<4",
+    "plyer>=2.1",
+    "tzdata>=2024.1",  # IANA tz data for APScheduler/zoneinfo on Windows
+    # --- dashboard ---
+    "streamlit>=1.36",
+    "plotly>=5.22",
+    # --- logging ---
+    "loguru>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "mypy>=1.10",
+]
+
+[tool.uv]
+# Project lives under OneDrive, which blocks hardlinks; copy instead.
+link-mode = "copy"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Imports in this project are `from src.core...`, so `src` itself is the
+# importable top-level package.
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+# Make `src` importable in tests without requiring an editable install.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
