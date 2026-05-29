@@ -6,7 +6,7 @@ import json
 
 import streamlit as st
 
-from src.dashboard.components import charts, data, theme
+from src.dashboard.components import charts, data, legend, theme
 
 
 def render() -> None:
@@ -44,6 +44,8 @@ def render() -> None:
             col.metric(label, theme.status_label(rec.status), theme.stars(rec.confidence) or None)
         else:
             col.metric(label, "—")
+
+    legend.render_chart_legend()
 
     fig = charts.build_price_chart(ticker, df, sigs, alerts, last_n=int(last_n))
     st.plotly_chart(fig, use_container_width=True)
