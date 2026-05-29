@@ -74,5 +74,5 @@ uv run mypy src           # strict type check
 - [x] **Session 2** — EMA pullback + ATH pullback + bullish patterns + confidence scoring
 - [x] **Session 3** — consolidation breakout + IPO base
 - [x] **Session 4** — signal orchestrator + background agent (daily-close scheduler, notifications, `--once` CLI)
-- [ ] Session 5 — dashboard
+- [x] **Session 5** — Streamlit dashboard (overview, chart, value chain, alerts)
 - [ ] Session 6 — testing, edge cases, polish

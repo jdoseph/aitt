@@ -87,10 +87,20 @@ class AlertRecord(SQLModel, table=True):
 class Storage:
     """Thin facade over a SQLModel engine with domain-specific helpers."""
 
-    def __init__(self, db_path: Path | str | None = None, *, echo: bool = False) -> None:
+    def __init__(
+        self,
+        db_path: Path | str | None = None,
+        *,
+        echo: bool = False,
+        check_same_thread: bool = True,
+    ) -> None:
         path = Path(db_path) if db_path is not None else settings.db_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.engine = create_engine(f"sqlite:///{path}", echo=echo)
+        # The dashboard (Streamlit) shares one cached Storage across script
+        # threads, so it opens with check_same_thread=False.
+        self.engine = create_engine(
+            f"sqlite:///{path}", echo=echo, connect_args={"check_same_thread": check_same_thread}
+        )
         self.create_all()
 
     @classmethod
