@@ -71,7 +71,7 @@ uv run mypy src           # strict type check
 ## Build status
 
 - [x] **Session 1** — scaffolding + data layer (config, watchlist, data, storage)
-- [ ] Session 2 — EMA pullback + ATH pullback + bullish patterns
+- [x] **Session 2** — EMA pullback + ATH pullback + bullish patterns + confidence scoring
 - [ ] Session 3 — consolidation breakout + IPO base
 - [ ] Session 4 — signal orchestrator + background agent
 - [ ] Session 5 — dashboard

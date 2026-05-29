@@ -54,9 +54,10 @@ class Settings(BaseSettings):
     consolidation_min_days: int = 10
     breakout_volume_mult: float = 1.5
 
-    # --- Strategy 3: ATH pullback ---
+    # --- Strategy 3: ATH pullback (pullback % below ATH defines the bands) ---
+    # AT_ATH: <=at | MINOR: at..entry_low | ENTRY_ZONE: entry_low..entry_high
+    # DEEP: entry_high..deep | CORRECTION: >deep
     ath_at_pct: float = 1.0
-    ath_minor_pct: float = 5.0
     ath_entry_low_pct: float = 5.0
     ath_entry_high_pct: float = 10.0
     ath_deep_pct: float = 20.0

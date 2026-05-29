@@ -9,6 +9,7 @@ changes, giving cheap hot-reload.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, field_validator
@@ -73,7 +74,7 @@ class Watchlist(BaseModel):
         return self.layers.get(layer_key, layer_key)
 
 
-def _parse_watchlist(raw: dict) -> Watchlist:
+def _parse_watchlist(raw: dict[str, Any]) -> Watchlist:
     layers = raw.get("layers") or {}
     tickers = raw.get("tickers") or []
     return Watchlist(

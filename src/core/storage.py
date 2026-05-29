@@ -21,7 +21,7 @@ from typing import Any, Optional, Sequence
 import pandas as pd
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlmodel import Field, Session, SQLModel, col, create_engine, select
 
 from src.core.config import settings
 
@@ -143,7 +143,7 @@ class Storage:
         ticker = ticker.upper()
         with self.session() as s:
             rows = s.exec(
-                select(PriceBar).where(PriceBar.ticker == ticker).order_by(PriceBar.date)
+                select(PriceBar).where(PriceBar.ticker == ticker).order_by(col(PriceBar.date))
             ).all()
         if not rows:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
@@ -212,7 +212,7 @@ class Storage:
                 stmt = stmt.where(SignalRecord.ticker == ticker.upper())
             if date is not None:
                 stmt = stmt.where(SignalRecord.date == date)
-            return list(s.exec(stmt.order_by(SignalRecord.confidence.desc())).all())  # type: ignore[attr-defined]
+            return list(s.exec(stmt.order_by(col(SignalRecord.confidence).desc())).all())
 
     def latest_signal(self, ticker: str, strategy: str) -> SignalRecord | None:
         """Most recent signal row for a (ticker, strategy) — used for transition detection."""
@@ -220,7 +220,7 @@ class Storage:
             return s.exec(
                 select(SignalRecord)
                 .where(SignalRecord.ticker == ticker.upper(), SignalRecord.strategy == strategy)
-                .order_by(SignalRecord.date.desc())  # type: ignore[attr-defined]
+                .order_by(col(SignalRecord.date).desc())
             ).first()
 
     # --- alerts ----------------------------------------------------------- #
@@ -255,7 +255,7 @@ class Storage:
             stmt = select(AlertRecord)
             if acknowledged is not None:
                 stmt = stmt.where(AlertRecord.acknowledged == acknowledged)
-            return list(s.exec(stmt.order_by(AlertRecord.created_at.desc())).all())  # type: ignore[attr-defined]
+            return list(s.exec(stmt.order_by(col(AlertRecord.created_at).desc())).all())
 
     def acknowledge_alert(self, alert_id: int) -> bool:
         with self.session() as s:
