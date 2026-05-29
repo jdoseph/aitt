@@ -76,3 +76,5 @@ uv run mypy src           # strict type check
 - [x] **Session 4** — signal orchestrator + background agent (daily-close scheduler, notifications, `--once` CLI)
 - [x] **Session 5** — Streamlit dashboard (overview, chart, value chain, alerts)
 - [ ] Session 6 — testing, edge cases, polish
+- [ ] Session 7 — setup quality scorecard (trend / volume / earnings / rel-strength / R:R / resistance / leading layer / breadth) + composite grade
+- [ ] Session 8 — evidence layer: historical win-rate replay + catalysts (headlines)

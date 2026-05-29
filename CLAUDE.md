@@ -22,7 +22,7 @@ The watchlist and value chain understanding is informed by:
 
 ## Working with this spec
 
-**This project is built across 6 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
+**This project is built across 8 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
 
 1. **Re-read this CLAUDE.md** — it may have been updated since the last session
 2. **Check the Open questions section** — resolve any 🔴 items before writing code if not yet answered
@@ -77,6 +77,13 @@ ai-infra-tracker/
 │   │   │   ├── ath_pullback.py # Strategy 3: % pullback from ATH
 │   │   │   └── ipo_base.py     # Strategy 4: IPO base breakout
 │   │   ├── signals.py          # Orchestrator: runs all strategies, deduplicates
+│   │   ├── levels.py           # Resistance, suggested stop, risk/reward (Session 7)
+│   │   ├── benchmarks.py       # SPY/QQQ/SMH relative strength (Session 7)
+│   │   ├── earnings.py         # Next earnings date / days-to-earnings (Session 7)
+│   │   ├── market.py           # AI breadth + value-chain layer leadership (Session 7)
+│   │   ├── scorecard.py        # 8-check setup quality grade (Session 7; +9/10 in Session 8)
+│   │   ├── backtest.py         # Historical signal win-rate replay (Session 8)
+│   │   ├── news.py             # Recent catalysts via yfinance headlines (Session 8)
 │   │   └── storage.py          # SQLite ORM (SQLModel)
 │   ├── agent/
 │   │   ├── scheduler.py        # APScheduler entry point
@@ -109,7 +116,9 @@ ai-infra-tracker/
 
 ## Implementation sessions
 
-Build this project across **6 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
+Build this project across **8 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
+
+> Sessions 1–5 are complete (on `main`). Session 6 (hardening/polish) and the two new sessions below — **Session 7 (Setup Quality Scorecard)** and **Session 8 (Evidence layer: historical edge + catalysts)** — remain.
 
 ---
 
@@ -235,6 +244,55 @@ Build this project across **6 sequential sessions**. Each session is self-contai
 - Add a fake IPO ticker to YAML, confirm Strategy 4 activates correctly
 - Remove a ticker from YAML, confirm agent handles gracefully on next cycle
 - All open questions from the bottom of this doc that affect implementation have been resolved or documented
+
+---
+
+### Session 7 — Setup Quality Scorecard + composite grading
+
+**Goal:** Turn each actionable signal into a *graded setup* by running the 8 computable confirmations (trend, earnings proximity, volume, relative strength, resistance/headroom, risk/reward, leading layer, AI breadth) and rolling them into a quality grade + action. Surface the composite in alerts and the dashboard. See the "Setup Quality Scorecard" section above for the conceptual spec.
+
+**Build:**
+- `src/core/levels.py` — `nearest_resistance(df, price)` from recent swing highs + ATH; `suggested_stop(df, signal)` (below the relevant 21/50 EMA or recent swing low, ATR-aware); `risk_reward(entry, stop, target)`.
+- `src/core/benchmarks.py` — fetch SPY/QQQ/SMH (configurable) through the `data.fetch_prices` seam (cached); `relative_strength(ticker_df, bench_df, lookback)` → N-day return delta + outperform flag.
+- `src/core/earnings.py` — `days_to_earnings(ticker)` via yfinance (`get_earnings_dates` / `calendar`), cached daily; returns `None` gracefully when unavailable.
+- `src/core/market.py` — cycle-level context from all signals: `breadth(signals)` (bullish / neutral / bearish counts) and `layer_leadership(signals, watchlist)` (rank layers by aggregate confidence / entry density).
+- `src/core/scorecard.py` — `Check` (name, status pass/warn/fail/na, value, detail), `Scorecard` (checks + weighted `score` + `action`); `build_scorecard(signal, df, ctx)` assembles checks 1–8. Pure/deterministic given its inputs (price df, benchmark data, earnings date, market context).
+- Integrate into `signals.py`: the orchestrator computes market context once per cycle, attaches a scorecard to each **actionable** signal, stores a compact summary in the signal/alert `details`, and folds the grade into alert sorting (grade, then confidence).
+- `agent/notify.py` — alerts render the composite scorecard block (format in the section above).
+- Dashboard — scorecard panel on the **Chart** page; **Overview** gains a `Quality` / `Action` column and a small **breadth + leading-layers** header widget; new `components/scorecard.py` renderer.
+- `config.py` — `min_risk_reward` (2.0), `earnings_buffer_days` (5), `rs_lookback` (20), `rs_benchmarks` (["SPY","QQQ","SMH"]), `resistance_lookback`, `low_headroom_pct` (3.0), breadth thresholds, per-check weights, grade cutoffs.
+- Tests: `test_levels.py`, `test_benchmarks.py`, `test_market.py`, `test_scorecard.py` (synthetic, deterministic).
+
+**Verify before moving on:**
+- Scorecard for NVDA prints all 8 checks (pass/warn/fail) and a final action.
+- R:R, nearest resistance, and suggested stop are sane on NVDA / VRT / RDW / TXN.
+- Relative strength flips correctly for a synthetic outperformer vs a laggard.
+- `days_to_earnings` returns a sane count (or graceful `None`) for a real ticker.
+- Breadth counts + layer-leadership ranking computed across the watchlist.
+- `python -m src.agent --once` alerts now show the composite block; dashboard shows Quality + breadth.
+- `pytest tests/ -v` and `mypy --strict` green.
+
+---
+
+### Session 8 — Evidence layer: historical edge + catalysts
+
+**Goal:** Add the two evidence checks — historical win-rate for the *exact* setup, and recent catalysts — so the final alert is backed by base rates and a reason for the move. Both degrade gracefully (status `n/a`, never fail the cycle) when data is thin.
+
+**Build:**
+- `src/core/backtest.py` — historical signal replay: for a (ticker, strategy, status), fetch extended history (`backtest_history_period`, ~2–5y daily), find prior occurrences of that status, and measure forward 5/10/20-day returns → `win_rate`, `avg_return`, `n`. Cache in a `backtest_stats` table; refresh when older than `backtest_refresh_days`.
+- `src/core/news.py` — recent headlines via yfinance `Ticker.news` (last `news_days`, default 7) → `[{title, publisher, published, link}]`; plus an **earnings-beat heuristic** from `get_earnings_dates` (actual vs estimate) → "beat / missed last earnings". **No NLP / sentiment.** Returns "No known catalyst" when empty.
+- Extend `scorecard.py` with checks 9 (historical edge) and 10 (catalysts) — additive; `n/a` when below `backtest_min_occurrences` or no news.
+- `storage.py` — `backtest_stats` table + read/write helpers.
+- Dashboard — **Chart** page shows the historical-edge stat + a recent-headlines list; **Alerts** shows win-rate + top catalyst; composite alert gains the two rows.
+- `config.py` — `backtest_history_period` ("5y"), `backtest_horizons` ([5,10,20]), `backtest_min_occurrences` (5), `backtest_refresh_days` (7), `news_days` (7), `news_max_items` (5).
+- Tests: `test_backtest.py` (synthetic history with engineered forward outcomes → known win rate), `test_news.py` (mocked yfinance `news` / earnings).
+
+**Verify before moving on:**
+- Backtest for NVDA `AT_21_EMA` over the configured window returns `n`, win rate, avg forward return; result cached and reused on the next call.
+- `news.py` returns recent headlines for an active name (or "No known catalyst"); earnings-beat heuristic computes for a name with earnings history.
+- Composite alert now includes **Historical edge** and **Catalyst** rows.
+- Edge cases: no earnings data, no news, history below `backtest_min_occurrences` → all degrade to `n/a` without breaking the cycle.
+- `pytest tests/ -v` and `mypy --strict` green; a full `--once` cycle still completes in reasonable time (backtest is cached).
 
 ---
 
@@ -444,6 +502,50 @@ Alert priority in notifications scales with stars — ⭐⭐⭐ alerts are loude
 
 ---
 
+## Setup Quality Scorecard (decision framework)
+
+Confidence stars answer a narrow question — *"did a candlestick pattern confirm the signal?"* The **scorecard** answers the bigger one: *"is this one of the best opportunities in the AI infrastructure universe right now?"*
+
+After a strategy fires and pattern confidence is attached, the agent runs a fixed checklist of confirmations and rolls them into an overall **quality grade + action**. Each check returns ✅ pass / ⚠️ warn / ❌ fail (plus the underlying value). The scorecard never overrides detection — a low grade still records the signal, it just tells you to pass.
+
+**Computable checks (Session 7):**
+
+1. **Trend** — close vs 50 EMA. Pass above, fail below. *The single most important filter* — below the 50 EMA you're often buying into a downtrend. (Already computed as `metrics.above_50_ema`.)
+2. **Earnings proximity** — trading days to next earnings. Warn if within `earnings_buffer_days` (default 5). A perfect setup can be wrecked by an earnings gap.
+3. **Volume support** — latest volume vs 20-day average. Pass ≥1.5×, warn ≥1.0×, fail <1.0×. (Already computed as `metrics.vol_ratio`.)
+4. **Relative strength** — N-day return vs SPY / QQQ / SMH. Pass if outperforming, fail if lagging badly. (If SPY is +5% and the name is −10%, that's a warning.)
+5. **Nearest resistance & headroom** — distance to the nearest swing-high / ATH above price. Low headroom (<~3%) warns: little room to run.
+6. **Risk / reward** — entry = close, stop = below the relevant EMA / recent swing low, target = nearest resistance / ATH. Pass if R:R ≥ `min_risk_reward` (default 2.0). Even a high-conviction setup may not be worth taking at 0.75 R:R.
+7. **Leading layer** — is this ticker's value-chain layer one of the strongest right now (aggregate confidence / entry density)? Sector leadership matters — money rotating into interconnects vs power is signal.
+8. **AI breadth** — health of the whole basket (bullish / neutral / bearish counts). Context: 29/38 bullish is a very different tape than 8/38.
+
+**Evidence checks (Session 8):**
+
+9. **Historical edge** — prior occurrences of this exact (ticker, strategy, status) and the forward 5/10/20-day win rate. Trade base rates, not intuition.
+10. **Catalysts** — recent headlines + an earnings-beat heuristic explaining *why* it's moving (free yfinance headlines, no NLP).
+
+The grade aggregates the checks (weighted — Trend and R:R weigh most; thresholds in `config.py`) into an **action**: `HIGH-QUALITY`, `DECENT`, `MARGINAL`, or `AVOID`.
+
+**The upgraded alert (target output):**
+
+```
+NVDA ⭐⭐⭐   ENTRY_ZONE
+Trend:         Above 50 EMA           ✅
+Volume:        1.8x average           ✅
+Earnings:      32 days away           ✅
+Rel. strength: Outperforming QQQ      ✅
+Risk/Reward:   3.4 : 1                ✅
+Resistance:    $250 (+15.7% headroom) ✅
+AI breadth:    29/38 bullish          ✅
+Hist. edge:    74% win (20d, n=18)    ✅   ← Session 8
+Catalyst:      Raised guidance         •   ← Session 8
+Action:        HIGH-QUALITY SETUP
+```
+
+At that point you're not just asking "did it touch the 21 EMA?" — you're asking "is this one of the best opportunities in the whole AI value chain right now?"
+
+---
+
 ## Dashboard
 
 **Overview page** — table of every ticker with:
@@ -508,7 +610,7 @@ streamlit run src/dashboard/app.py               # dashboard at localhost:8501
 
 - Brokerage integration / automated order placement
 - Intraday timeframes (4h, 1h) — daily only first
-- Full backtesting framework (historical signal viewer is a lighter v2 option)
+- Full backtesting framework (a *lightweight* per-setup win-rate replay is now in Session 8; a full strategy backtester/optimizer stays out)
 - Options flow / unusual options activity
 - News sentiment / NLP on earnings calls
 - Relative strength ranking system (v2 candidate)
@@ -535,7 +637,7 @@ Tagged by priority. **Resolve 🔴 before writing code.** Update this section as
 5. **Trend filter.** Should the agent skip alerts when the stock is in a downtrend? Proposed rule: only alert if price > 50 EMA. Otherwise EMA touches in a falling stock generate constant noise.
 6. **Volume confirmation.** Require above-average volume on the EMA touch for a higher-quality signal, or alert on any touch regardless of volume?
 7. **Alert channels.** Desktop notifications (default), email, Discord webhook, Slack webhook, SMS (Twilio)? Pick any combination.
-8. **Stop-loss in alert body.** Include suggested stop (e.g., "9 EMA at $19.50, suggested stop $18.30 / -6%") or keep alerts minimal?
+8. **Stop-loss in alert body.** → **Resolved (Session 7):** yes — the scorecard's risk/reward check computes entry / suggested stop / target and shows R:R in the composite alert.
 9. **Watchlist edits.** YAML file the user edits manually, or a "manage tickers" page in the dashboard?
 10. **Pre/post-market data.** Include extended hours in price/EMA calc, or regular session only?
 11. **Consolidation parameters.** Strategy 2 defaults: 8% range, 10+ trading days. Are these reasonable for AI stocks, or should the range be wider (these are volatile names)?
@@ -548,11 +650,11 @@ Tagged by priority. **Resolve 🔴 before writing code.** Update this section as
 ### 🟢 Nice-to-have (defer to v2 unless requested)
 
 17. **Trade journal.** Let user mark "I bought this alert at $X" and track outcomes.
-18. **Historical signal viewer.** "Show me every time RDW touched its 21 EMA in the last 12 months" with the subsequent 5/10/20-day return. Useful for confidence without building a full backtester.
+18. **Historical signal viewer.** → **Scheduled (Session 8):** a lightweight per-setup historical replay computes the forward 5/10/20-day win rate for each (ticker, strategy, status). Not a full backtester — just base rates for the scorecard's "historical edge" check.
 19. **International tickers.** yfinance supports SIE.DE, 6981.T, etc. Include non-ADR foreign tickers?
 20. **Multi-timeframe.** 4h and 1h EMAs alongside daily.
-21. **News/catalyst tagging.** Annotate alerts with whether earnings is within 7 days, etc.
-22. **Relative strength overlay.** Track each ticker's performance vs. SPY or QQQ — highlight names with strongest relative strength.
+21. **News/catalyst tagging.** → **Scheduled (Session 8):** recent headlines via yfinance + an earnings-beat heuristic feed the scorecard's "catalysts" check. Earnings proximity is its own check (Session 7). No NLP/sentiment.
+22. **Relative strength overlay.** → **Scheduled (Session 7):** relative strength vs SPY / QQQ / SMH is a scorecard check; the dashboard can surface the strongest names.
 23. **IPO news scanner.** Auto-detect Anthropic/OpenAI IPO filings (S-1, pricing) from news feeds and auto-add tickers.
 24. **Value chain flow alerts.** "3 out of 5 interconnect stocks are consolidating" — layer-level signal aggregation.
 25. **Sector rotation detection.** When money moves between value chain layers (e.g., from semis to power), flag the shift.
