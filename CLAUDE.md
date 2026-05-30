@@ -22,7 +22,7 @@ The watchlist and value chain understanding is informed by:
 
 ## Working with this spec
 
-**This project is built across 8 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
+**This project is built across 9 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
 
 1. **Re-read this CLAUDE.md** — it may have been updated since the last session
 2. **Check the Open questions section** — resolve any 🔴 items before writing code if not yet answered
@@ -84,6 +84,7 @@ ai-infra-tracker/
 │   │   ├── scorecard.py        # 8-check setup quality grade (Session 7; +9/10 in Session 8)
 │   │   ├── backtest.py         # Historical signal win-rate replay (Session 8)
 │   │   ├── news.py             # Recent catalysts via yfinance headlines (Session 8)
+│   │   ├── dossier.py          # Bull/bear case + trade plan (Session 9)
 │   │   └── storage.py          # SQLite ORM (SQLModel)
 │   ├── agent/
 │   │   ├── scheduler.py        # APScheduler entry point
@@ -116,9 +117,9 @@ ai-infra-tracker/
 
 ## Implementation sessions
 
-Build this project across **8 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
+Build this project across **9 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
 
-> Sessions 1–5 are complete (on `main`). Session 6 (hardening/polish) and the two new sessions below — **Session 7 (Setup Quality Scorecard)** and **Session 8 (Evidence layer: historical edge + catalysts)** — remain.
+> **Status:** Sessions 1–5 and **7** are complete (on `main`). Remaining: **Session 6** (hardening/polish), **Session 8** (Evidence layer: historical edge + catalysts), and **Session 9** (Trade Due Diligence Dossier — bull/bear case + trade plan). Sessions can be built in any order, but 8 and 9 build on 7 (done).
 
 ---
 
@@ -293,6 +294,31 @@ Build this project across **8 sequential sessions**. Each session is self-contai
 - Composite alert now includes **Historical edge** and **Catalyst** rows.
 - Edge cases: no earnings data, no news, history below `backtest_min_occurrences` → all degrade to `n/a` without breaking the cycle.
 - `pytest tests/ -v` and `mypy --strict` green; a full `--once` cycle still completes in reasonable time (backtest is cached).
+
+---
+
+### Session 9 — Trade Due Diligence Dossier (bull/bear case + trade plan)
+
+**Goal:** Synthesize everything — the four strategy signals, the Session 7 scorecard, Session 8 evidence, and benchmark/market context — into one per-candidate **dossier** that forces a balanced bull-vs-bear case and a concrete trade plan, anchored by *"why should I NOT buy this?"* See the "Trade Due Diligence Dossier" section above for the conceptual spec. Builds on Session 7; enriched by Session 8 when present. **The bear case is never empty on a graded setup**, and the position plan is **informational only — never automated**.
+
+**Build:**
+- `src/core/indicators.py` — add `EMA_200`, distance-to-200 %, `above_200_ema`; bump `history_bars` to ~260 so the 200 EMA is meaningfully warmed.
+- `src/core/benchmarks.py` — `above_own_ema(df, span=21)` and `market_regime(benchmarks)` → QQQ / SMH above-their-own-21-EMA flags.
+- `src/core/levels.py` — `strategy_stop(df, signal, metrics)` (context-aware: 21 EMA vs range low vs swing low) and `invalidation_text(signal)`.
+- `src/core/dossier.py` — `Dossier` (reasons_to_buy, reasons_not_to_buy, strongest_bull, strongest_bear, confluence, extension, trend_alignment, market_regime, trade_plan, manual_catalyst_checks) and `build_dossier(ticker, signals, scorecard, ctx)`. Pure given its inputs. Reasons are derived from the scorecard's pass/warn/fail checks plus the dossier-specific checks. The **position plan** (sizing tier from grade, add-levels, profit targets) is suggestion-only.
+- `src/core/signals.py` — after grading, build one dossier per ticker that has an alertable signal (using all of that ticker's strategy signals + the best signal's scorecard); store a compact summary in `details` or a `dossiers` table keyed `(ticker, date)`.
+- `src/agent/notify.py` — alerts include the **Reasons NOT to buy** (top bear factors) next to the grade.
+- Dashboard — a **Dossier panel** on the **Chart** page (two-column Reasons to buy / NOT to buy + trade plan + confluence + regime); **Overview** can show the single strongest bear factor.
+- `config.py` — `ema_chasing_pct` (15.0), grade→sizing-tier mapping, `regime_ema_span` (21), `profit_target_pcts` ([10, 15]), `dossier_max_reasons`.
+- Tests: `test_dossier.py` (synthetic — bull/bear split, confluence count, trend alignment, regime, context-aware stop + invalidation per strategy), plus `EMA_200` and benchmark-regime tests.
+
+**Verify before moving on:**
+- Dossier for a real name lists both reasons to buy *and* reasons NOT to buy (bear case never empty on a graded setup).
+- Strategy confluence count matches the ticker's actual signals.
+- Trend alignment uses both the 50 and 200 EMA; market regime reflects QQQ / SMH vs their 21 EMA.
+- Trade plan: the stop differs by setup type; invalidation text is present; the sizing tier follows the grade.
+- Composite alert and the Chart dossier panel show the bull/bear case.
+- `pytest tests/ -v` and `mypy --strict` green.
 
 ---
 
@@ -504,6 +530,8 @@ Alert priority in notifications scales with stars — ⭐⭐⭐ alerts are loude
 
 ## Setup Quality Scorecard (decision framework)
 
+> **Guiding principle: a ⭐⭐⭐ signal is the *start* of due diligence, not the final decision.** Detection ("did it touch the 21 EMA?") and pattern confidence answer *whether a setup exists*. The scorecard answers *whether it's worth taking* — and a high-confidence pattern can still be a poor trade (lagging the market, no room to resistance, bad risk/reward, right before earnings). The agent surfaces the candidate; the scorecard is the checklist you'd otherwise run by hand.
+
 Confidence stars answer a narrow question — *"did a candlestick pattern confirm the signal?"* The **scorecard** answers the bigger one: *"is this one of the best opportunities in the AI infrastructure universe right now?"*
 
 After a strategy fires and pattern confidence is attached, the agent runs a fixed checklist of confirmations and rolls them into an overall **quality grade + action**. Each check returns ✅ pass / ⚠️ warn / ❌ fail (plus the underlying value). The scorecard never overrides detection — a low grade still records the signal, it just tells you to pass.
@@ -543,6 +571,47 @@ Action:        HIGH-QUALITY SETUP
 ```
 
 At that point you're not just asking "did it touch the 21 EMA?" — you're asking "is this one of the best opportunities in the whole AI value chain right now?"
+
+---
+
+## Trade Due Diligence Dossier (bull vs bear)
+
+The scorecard grades a setup's *quality*. The **dossier** is the layer above it that turns quality into a *decision* — and guards against confirmation bias. Its anchor is the single most important question:
+
+> **"Why should I NOT buy this stock right now?"**
+
+A detection engine that only lists reasons to buy becomes a confirmation-bias machine. The dossier always surfaces the **bear case next to the bull case**, plus a concrete **trade plan** — so a ⭐⭐⭐ signal is the *start* of due diligence, not the end. It never tells you to trade; it hands you the bull case, the bear case, and the plan, then leaves the call to you.
+
+For each candidate the dossier assembles:
+
+- **Reasons to buy / reasons NOT to buy** — every scorecard *pass* becomes a bull point, every *warn/fail* a bear point, augmented by the dossier-specific checks below. The single strongest of each is highlighted. The bear list is never empty on a graded setup.
+- **Strategy confluence** — how many of the four strategies agree (e.g. "2/4: EMA `AT_21_EMA` + ATH `ENTRY_ZONE`"). Multiple strategies aligning beats a lone signal.
+- **Extension** — % above the 21 / 50 EMA. ~3% above = reasonable; ~15-25%+ above = chasing.
+- **Trend alignment** — above the 50 EMA *and* the 200 EMA (full alignment) vs only one vs neither.
+- **Market regime** — is the tape supporting the trade? QQQ above its own 21 EMA, semis (SMH) above its 21 EMA, and the AI-basket breadth (from the scorecard). Sometimes the sector matters more than the stock.
+- **Trade plan** —
+  - **Stop**, chosen by setup type: EMA pullback → just below the 21 EMA; consolidation → below the range low; ATH dip → below the recent swing low.
+  - **Invalidation condition** (plain text): "close below the 21 EMA" / "breakdown from the base" / "loss of the 50 EMA".
+  - **Targets**: nearest resistance / ATH / measured move, with R:R.
+  - **Position plan — informational only, never automated:** a sizing *tier* tied to the grade (HIGH-QUALITY → full, DECENT → half, MARGINAL → starter), where you'd add, and profit-taking levels (e.g. +10% / +15% / trailing).
+- **Catalyst check** — earnings proximity + recent headlines ("why is it pulling back?", Session 8), plus a **manual-check reminder** for catalysts with no free feed (product launch, investor day, lockup expiration, regulatory decision).
+
+Example dossier:
+
+```
+NVDA ⭐⭐⭐   ENTRY_ZONE                       Grade: HIGH-QUALITY
+
+Reasons to BUY                    Reasons NOT to buy
+- Above 50 & 200 EMA             - Earnings in 4 days ⚠️
+- ENTRY_ZONE + bullish engulfing - 18% above 50 EMA (extended)
+- Outperforming QQQ & SMH        - Resistance only 2% overhead
+- 2/4 strategies aligned
+- AI breadth 29/38 bullish
+
+Strongest bull: relative strength      Strongest bear: overhead resistance
+Trade plan:  stop $205 (below 21 EMA) · invalidation: close < 21 EMA ·
+             target $250 (+15.7%) · R:R 3.1 · size: FULL · take profits +10% / +15%
+```
 
 ---
 
@@ -614,7 +683,7 @@ streamlit run src/dashboard/app.py               # dashboard at localhost:8501
 - Options flow / unusual options activity
 - News sentiment / NLP on earnings calls
 - Relative strength ranking system (v2 candidate)
-- Automated position sizing / risk management
+- Automated position sizing / risk management (Session 9 adds *informational* sizing tiers, stop/target, and profit-take levels — surfaced as suggestions, never auto-executed; actual order placement stays out)
 - Sector rotation quantitative model (qualitative in v1 via value chain view)
 
 These are good v2 candidates but would balloon scope.
