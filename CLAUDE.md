@@ -126,7 +126,7 @@ ai-infra-tracker/
 
 Build this project across **12 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
 
-> **Status:** Sessions 1–5, **7**, **8**, **9**, and **10** are complete (on `main`). Remaining: **6** (hardening/polish), **11** (Composite score + cross-sectional ranking + rotation + thesis), **12** (Deeper signals: accumulation / weekly / Weinstein stage / crowding / capex). Sessions 11–12 build on the scorecard (7), evidence (8), dossier (9), and regime gate (10). A deferred **v2 portfolio-aware track** is described after Session 12.
+> **Status:** Sessions 1–5, **7**, **8**, **9**, **10**, and **12** are complete (on `main`). Remaining: **6** (hardening/polish) and **11** (Composite score + cross-sectional ranking + rotation + thesis). **Session 12 was built before 11** (its deeper-signal outputs — accumulation, weekly trend, Weinstein stage, ATR/crowding, capex_exposure — are inputs the Session 11 composite score consumes, so 11 now gets real values instead of `n/a`). Sessions 11–12 build on the scorecard (7), evidence (8), dossier (9), and regime gate (10). A deferred **v2 portfolio-aware track** is described after Session 12.
 >
 > **Note (Session 10 config):** the canonical RISK_ON/OFF gate uses `regime_gate_ema_span` (50). Session 9's *informational* 21-EMA line keeps `regime_ema_span` (21) — the two are intentionally separate knobs (the spec's "`regime_ema_span` (50)" for Session 10 was renamed to avoid clobbering Session 9's).
 >

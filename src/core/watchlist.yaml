@@ -1,6 +1,9 @@
 # AI data-center value-chain watchlist.
-# Schema per entry: {ticker, name, layer, notes}
+# Schema per entry: {ticker, name, layer, notes, capex_exposure}
 # `layer` must be one of the keys in `layers:` below (used for ordering/colors).
+# `capex_exposure` (0-100): how directly the name benefits from AI data-center
+#   capex — feeds the composite score's AI-capex factor (Session 11/12). Optional;
+#   omitted entries fall back to AITT_CAPEX_EXPOSURE_DEFAULT (50).
 # Edit freely — the agent hot-reloads this file on the next evaluation cycle.
 
 # Ordered layer definitions (display order + human-readable titles).
@@ -22,181 +25,222 @@ tickers:
     name: NVIDIA
     layer: layer1
     notes: "75-86% DC AI market share, $115B DC revenue FY2025"
+    capex_exposure: 100
   - ticker: AMD
     name: Advanced Micro Devices
     layer: layer1
     notes: "MI-series accelerators, ~$10B DC revenue, 30%+ server CPU share"
+    capex_exposure: 90
   - ticker: INTC
     name: Intel
     layer: layer1
     notes: "Gaudi line, Falcon Shores; weakened but relevant"
+    capex_exposure: 55
 
   # --- Layer 2: ASIC Co-designers ---
   - ticker: AVGO
     name: Broadcom
     layer: layer2
     notes: "~60% custom ASIC co-design, ~$12B AI revenue, Google TPU partner"
+    capex_exposure: 95
   - ticker: MRVL
     name: Marvell
     layer: layer2
     notes: "~35% ASIC co-design, AWS + Microsoft partner"
+    capex_exposure: 90
 
   # --- Layer 3: Semiconductors (analog, memory, IP) ---
   - ticker: TXN
     name: Texas Instruments
     layer: layer3
     notes: "Analog, power management"
+    capex_exposure: 55
   - ticker: MU
     name: Micron
     layer: layer3
     notes: "HBM memory (bottleneck, 78% CAGR to 2027)"
+    capex_exposure: 90
   - ticker: ASML
     name: ASML Holding
     layer: layer3
     notes: "Lithography monopoly"
+    capex_exposure: 80
   - ticker: ARM
     name: Arm Holdings
     layer: layer3
     notes: "IP licensing, ~20% DC CPU share, Vera Rubin is ARM-exclusive"
+    capex_exposure: 80
   - ticker: ADI
     name: Analog Devices
     layer: layer3
     notes: "Power management, 800 VDC partner"
+    capex_exposure: 55
   - ticker: "ON"  # quoted: bare ON is parsed as boolean true in YAML
     name: onsemi
     layer: layer3
     notes: "Power semis, 800 VDC partner"
+    capex_exposure: 60
   - ticker: IFNNY
     name: Infineon Technologies
     layer: layer3
     notes: "Power management, 800 VDC partner (ADR)"
+    capex_exposure: 55
   - ticker: RNECY
     name: Renesas Electronics
     layer: layer3
     notes: "Power management, 800 VDC partner (ADR)"
+    capex_exposure: 50
 
   # --- Layer 4: Networking & Interconnects ---
   - ticker: ANET
     name: Arista Networks
     layer: layer4
     notes: "Data center switching"
+    capex_exposure: 90
   - ticker: CIEN
     name: Ciena
     layer: layer4
     notes: "Optical networking"
+    capex_exposure: 70
   - ticker: CRDO
     name: Credo Technology
     layer: layer4
     notes: "High-speed connectivity"
+    capex_exposure: 90
   - ticker: APH
     name: Amphenol
     layer: layer4
     notes: "NVLink spine cartridge, IT Datacom +134%"
+    capex_exposure: 80
   - ticker: TEL
     name: TE Connectivity
     layer: layer4
     notes: "Backup NVLink supplier, DAC/AEC cables"
+    capex_exposure: 65
   - ticker: GLW
     name: Corning
     layer: layer4
     notes: "Optical fiber, $6B Meta deal, sold out through 2026"
+    capex_exposure: 75
   - ticker: LITE
     name: Lumentum
     layer: layer4
     notes: "EML lasers in most 800G/1.6T transceivers, Q1 +58% YoY"
+    capex_exposure: 85
   - ticker: COHR
     name: Coherent
     layer: layer4
     notes: "800G/1.6T transceivers, InP laser leader"
+    capex_exposure: 85
 
   # --- Layer 5: Power & Electrical ---
   - ticker: VRT
     name: Vertiv Holdings
     layer: layer5
     notes: "Cooling + power, top 3 outside-the-rack player"
+    capex_exposure: 90
   - ticker: ETN
     name: Eaton
     layer: layer5
     notes: "Electrical distribution, 800 VDC partner"
+    capex_exposure: 75
   - ticker: GEV
     name: GE Vernova
     layer: layer5
     notes: "Turbines, grid infrastructure"
+    capex_exposure: 75
   - ticker: ABBNY
     name: ABB Ltd
     layer: layer5
     notes: "Electrification, 800 VDC partner (ADR)"
+    capex_exposure: 65
   - ticker: SIEGY
     name: Siemens AG
     layer: layer5
     notes: "Industrial electrification, 800 VDC partner (ADR)"
+    capex_exposure: 60
   - ticker: PWR
     name: Quanta Services
     layer: layer5
     notes: "Grid construction / electrical contracting"
+    capex_exposure: 70
 
   # --- Layer 6: Cooling & Thermal ---
   - ticker: NVT
     name: nVent Electric
     layer: layer6
     notes: "Thermal management, liquid cooling"
+    capex_exposure: 80
 
   # --- Layer 7: OEMs / Server Builders ---
   - ticker: SMCI
     name: Super Micro Computer
     layer: layer7
     notes: "Largest AI server ODM by GPU-server volume"
+    capex_exposure: 85
   - ticker: DELL
     name: Dell Technologies
     layer: layer7
     notes: "PowerEdge AI servers, $10B AI pipeline"
+    capex_exposure: 70
   - ticker: HPE
     name: Hewlett Packard Enterprise
     layer: layer7
     notes: "AI servers + HPC (Cray)"
+    capex_exposure: 65
 
   # --- Layer 8: Data Center REITs ---
   - ticker: EQIX
     name: Equinix
     layer: layer8
     notes: "Data center REIT"
+    capex_exposure: 75
   - ticker: DLR
     name: Digital Realty Trust
     layer: layer8
     notes: "Data center REIT"
+    capex_exposure: 75
 
   # --- Layer 9: Space & Adjacent ---
   - ticker: RDW
     name: Redwire
     layer: layer9
     notes: "Space infrastructure"
+    capex_exposure: 30
   - ticker: RKLB
     name: Rocket Lab
     layer: layer9
     notes: "Launch + space systems"
+    capex_exposure: 25
   - ticker: ASTS
     name: AST SpaceMobile
     layer: layer9
     notes: "Satellite broadband"
+    capex_exposure: 20
   - ticker: LUNR
     name: Intuitive Machines
     layer: layer9
     notes: "Lunar infrastructure"
+    capex_exposure: 20
 
   # --- Layer 10: Pre-IPO Proxies / AI Model Layer ---
   - ticker: MSFT
     name: Microsoft
     layer: layer10
     notes: "Exclusive OpenAI inference partner, Azure $100B+ run-rate"
+    capex_exposure: 85
   - ticker: GOOG
     name: Alphabet (Google)
     layer: layer10
     notes: "Gemini/TPU, $46B cloud run-rate"
+    capex_exposure: 85
   - ticker: AMZN
     name: Amazon
     layer: layer10
     notes: "AWS Trainium, $115B cloud run-rate"
+    capex_exposure: 85
   - ticker: META
     name: Meta Platforms
     layer: layer10
     notes: "600K+ GPUs, MTIA custom inference chip"
+    capex_exposure: 80

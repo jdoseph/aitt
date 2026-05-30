@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from src.core.config import settings
 
@@ -24,6 +24,10 @@ class WatchlistEntry(BaseModel):
     name: str
     layer: str
     notes: str = ""
+    # How directly the name benefits from AI data-center capex (0-100). Curated;
+    # feeds the composite score's AI-capex factor (Session 11/12). Defaults to a
+    # neutral mid-value when omitted so older watchlists still load.
+    capex_exposure: int = Field(default_factory=lambda: settings.capex_exposure_default)
 
     @field_validator("ticker")
     @classmethod
@@ -31,6 +35,13 @@ class WatchlistEntry(BaseModel):
         v = v.strip().upper()
         if not v:
             raise ValueError("ticker must be non-empty")
+        return v
+
+    @field_validator("capex_exposure")
+    @classmethod
+    def _clamp_capex(cls, v: int) -> int:
+        if not 0 <= v <= 100:
+            raise ValueError("capex_exposure must be within 0-100")
         return v
 
 

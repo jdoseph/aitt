@@ -128,6 +128,24 @@ class Settings(BaseSettings):
     dq_min_rr: float = 0.0  # >0 enables: suppress if R:R below this
     risk_off_min_stars: int = 2  # entry alerts need >= this confidence in RISK_OFF
 
+    # --- Session 12: deeper signals (institutional intent + trend context) ---
+    # Accumulation (OBV / A-D / up-down volume / close-in-range).
+    accumulation_lookback: int = 20
+    accumulation_acc_score: float = 60.0  # >= this => "accumulation" label
+    accumulation_dist_score: float = 40.0  # <= this => "distribution" label
+    # Multi-timeframe (weekly trend alignment).
+    weekly_ma_weeks: int = 30  # Weinstein's 30-week MA
+    weekly_slope_lookback: int = 5  # weeks used to measure the MA slope
+    weekly_slope_flat_pct: float = 0.5  # |MA % change| below this reads as flat
+    # Weinstein stage classification reuses the weekly-MA knobs above.
+    # ATR + crowding (volatility-normalized extension).
+    atr_window: int = 14
+    crowding_lookback: int = 20  # run-up window
+    crowding_atr_extended: float = 8.0  # ATRs above 200 EMA that read as "fully extended"
+    crowding_high_score: float = 70.0  # >= this 0-100 score => high crowding (a bear point)
+    # AI-capex exposure default for watchlist entries that omit it (0-100).
+    capex_exposure_default: int = 50
+
     # --- alerts ---
     min_confidence_stars: int = 1
     alert_desktop: bool = True

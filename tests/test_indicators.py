@@ -91,3 +91,48 @@ def test_compute_metrics_vol_ratio() -> None:
     df = make_ohlcv(closes, volumes=vols)
     m = ind.compute_metrics(df)
     assert m.vol_ratio > 1.0  # last volume above its trailing average
+
+
+# --- ATR (Session 12) ------------------------------------------------------- #
+def test_atr_constant_band_equals_band_width() -> None:
+    # high/low a fixed $2 apart, flat closes => TR == 2 every bar => ATR == 2.
+    closes = [100.0] * 40
+    df = make_ohlcv(closes, highs=[101.0] * 40, lows=[99.0] * 40)
+    a = ind.atr(df, window=14)
+    assert a.iloc[-1] == pytest.approx(2.0, abs=1e-6)
+
+
+def test_atr_none_when_thin() -> None:
+    df = make_ohlcv([100.0] * 10)  # fewer bars than the 14 window
+    m = ind.compute_metrics(df)
+    assert m.atr is None
+    assert m.atr_pct is None
+
+
+def test_metrics_atr_and_pct_populated() -> None:
+    df = make_ohlcv([100.0 + i for i in range(60)], highs=[101.0 + i for i in range(60)],
+                    lows=[99.0 + i for i in range(60)])
+    m = ind.compute_metrics(df)
+    assert m.atr is not None and m.atr > 0
+    assert m.atr_pct is not None and m.atr_pct > 0
+
+
+# --- crowding (ATR-normalized extension) ------------------------------------ #
+def test_crowding_none_without_200_ema() -> None:
+    df = make_ohlcv([100.0 + i for i in range(60)])  # < 200 bars => no ema_200
+    m = ind.compute_metrics(df)
+    assert m.crowding is None
+
+
+def test_crowding_distinguishes_volatile_from_calm_at_same_pct() -> None:
+    # Two names, both ~the same % above their 200 EMA, but different ATR.
+    n = 260
+    base = [100.0 + i * 0.5 for i in range(n)]  # smooth ramp -> 200 EMA well below
+    calm = make_ohlcv(base, highs=[c + 0.2 for c in base], lows=[c - 0.2 for c in base])
+    volatile = make_ohlcv(base, highs=[c + 5.0 for c in base], lows=[c - 5.0 for c in base])
+    mc = ind.compute_metrics(calm)
+    mv = ind.compute_metrics(volatile)
+    # Same closes => same % over the 200 EMA, but the calm (low-ATR) name reads as
+    # far more extended/crowded once normalized by volatility.
+    assert mc.crowding is not None and mv.crowding is not None
+    assert mc.crowding > mv.crowding

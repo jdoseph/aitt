@@ -22,9 +22,12 @@ import pandas as pd
 from src.core import benchmarks as bm
 from src.core import levels
 from src.core import market
+from src.core import multitimeframe as mtf
+from src.core.accumulation import AccumulationResult
 from src.core.config import settings
 from src.core.indicators import Metrics, compute_metrics
 from src.core.scorecard import FAIL, PASS, WARN, Check, Scorecard
+from src.core.stage import StageResult
 from src.core.strategies.base import Signal
 
 # Grade → suggested position-sizing tier (suggestion only, never executed).
@@ -48,18 +51,22 @@ _STRAT_SHORT = {
 _PRIORITY = {
     "trend": 0,
     "trend_200": 1,
-    "rel_strength": 2,
-    "risk_reward": 3,
-    "resistance": 4,
-    "extension": 5,
-    "confluence": 6,
-    "historical": 7,
-    "regime": 8,
-    "breadth": 9,
-    "volume": 10,
-    "earnings": 11,
-    "layer": 12,
-    "catalyst": 13,
+    "stage": 2,
+    "rel_strength": 3,
+    "risk_reward": 4,
+    "resistance": 5,
+    "extension": 6,
+    "crowding": 7,
+    "weekly": 8,
+    "accumulation": 9,
+    "confluence": 10,
+    "historical": 11,
+    "regime": 12,
+    "breadth": 13,
+    "volume": 14,
+    "earnings": 15,
+    "layer": 16,
+    "catalyst": 17,
 }
 
 # How each scorecard check reads as a bull (pass) / bear (warn|fail) reason.
@@ -164,6 +171,20 @@ class DossierContext:
     df: pd.DataFrame
     benchmarks: dict[str, pd.DataFrame] = field(default_factory=dict)
     best_signal: Signal | None = None  # drives the trade plan's stop type
+    # Session 12 deeper signals (None => that dimension is simply omitted).
+    stage: StageResult | None = None
+    weekly: mtf.WeeklyTrend | None = None
+    accumulation: AccumulationResult | None = None
+
+
+# Grades, worst -> best, for the Stage-4 grade cap.
+_GRADE_ORDER = ["AVOID", "MARGINAL", "DECENT", "HIGH-QUALITY"]
+
+
+def _cap_grade(grade: str, ceiling: str) -> str:
+    if grade not in _GRADE_ORDER or ceiling not in _GRADE_ORDER:
+        return grade
+    return grade if _GRADE_ORDER.index(grade) <= _GRADE_ORDER.index(ceiling) else ceiling
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +301,34 @@ def build_dossier(
         else:
             bear.append((_PRIORITY["regime"], f"Market regime weak ({regime_text})"))
 
+    # --- Session 12: deeper signals (stage / weekly / crowding / accumulation) ---
+    grade = card.action
+
+    if m.crowding is not None and m.crowding >= settings.crowding_high_score:
+        bear.append((_PRIORITY["crowding"], f"Crowded / extended (crowding {m.crowding:.0f}/100)"))
+
+    if ctx.stage is not None and ctx.stage.stage:
+        if ctx.stage.is_advancing:
+            bull.append((_PRIORITY["stage"], "Stage 2 (advancing) — buyable trend"))
+        elif ctx.stage.is_declining:
+            bear.append((_PRIORITY["stage"], "Stage 4 (declining) — falling-knife risk"))
+            grade = _cap_grade(grade, "MARGINAL")  # a dip in a downtrend isn't a dip
+        elif ctx.stage.stage == 3:
+            bear.append((_PRIORITY["stage"], "Stage 3 (topping) — momentum stalling"))
+
+    if ctx.weekly is not None:
+        if ctx.weekly.trend == mtf.UPTREND:
+            bull.append((_PRIORITY["weekly"], "Weekly uptrend (higher-timeframe aligned)"))
+        elif ctx.weekly.trend == mtf.DOWNTREND:
+            bear.append((_PRIORITY["weekly"], "Weekly downtrend (counter-trend setup)"))
+
+    if ctx.accumulation is not None:
+        acc = ctx.accumulation
+        if acc.label == "accumulation":
+            bull.append((_PRIORITY["accumulation"], f"Institutional accumulation (score {acc.score:.0f})"))
+        elif acc.label == "distribution":
+            bear.append((_PRIORITY["accumulation"], f"Distribution — sellers in control (score {acc.score:.0f})"))
+
     reasons_to_buy = _ordered(bull)
     reasons_not_to_buy = _ordered(bear)
     # The bear case is never empty on a graded setup — even a clean chart carries
@@ -298,13 +347,13 @@ def build_dossier(
         invalidation=levels.invalidation_text(best) if best else "loss of the 50 EMA",
         target=target,
         risk_reward=levels.risk_reward(m.close, stop, target),
-        sizing_tier=SIZING_BY_ACTION.get(card.action, "NONE"),
+        sizing_tier=SIZING_BY_ACTION.get(grade, "NONE"),
         profit_targets=[round(m.close * (1 + p / 100), 2) for p in settings.profit_target_pcts],
     )
 
     return Dossier(
         ticker=ticker,
-        grade=card.action,
+        grade=grade,
         reasons_to_buy=reasons_to_buy,
         reasons_not_to_buy=reasons_not_to_buy,
         strongest_bull=reasons_to_buy[0] if reasons_to_buy else None,

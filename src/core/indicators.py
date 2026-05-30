@@ -40,6 +40,56 @@ def distance_pct(value: float, reference: float) -> float:
     return (value - reference) / reference * 100.0
 
 
+def true_range(df: pd.DataFrame) -> pd.Series:
+    """Wilder's True Range per bar: max(H-L, |H-prevC|, |L-prevC|)."""
+    prev_close = df["close"].shift(1)
+    ranges = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    )
+    return ranges.max(axis=1, skipna=True)
+
+
+def atr(df: pd.DataFrame, window: int | None = None) -> pd.Series:
+    """Average True Range via Wilder's smoothing (EWM, alpha = 1/window)."""
+    window = window or settings.atr_window
+    tr = true_range(df)
+    return tr.ewm(alpha=1.0 / window, adjust=False, min_periods=window).mean()
+
+
+def crowding_score(
+    df: pd.DataFrame,
+    ema_200: float | None,
+    atr_val: float | None,
+    lookback: int | None = None,
+    atr_extended: float | None = None,
+) -> float | None:
+    """Volatility-normalized 0-100 crowding/extension score (higher = more extended).
+
+    Blends how many ATRs the price sits above its 200 EMA with the recent run-up,
+    both normalized by ATR so a calm name and a volatile name at the *same* percent
+    distance score differently. ``None`` when the 200 EMA or ATR isn't available.
+    """
+    if ema_200 is None or atr_val is None or atr_val <= 0:
+        return None
+    lookback = lookback or settings.crowding_lookback
+    atr_extended = atr_extended or settings.crowding_atr_extended
+    close = float(df["close"].iloc[-1])
+    ext_atrs = max(0.0, (close - ema_200) / atr_val)
+    ext_norm = min(1.0, ext_atrs / atr_extended)
+    if len(df) > lookback:
+        past = float(df["close"].iloc[-1 - lookback])
+        runup_atrs = max(0.0, (close - past) / atr_val)
+        runup_norm = min(1.0, runup_atrs / atr_extended)
+    else:
+        runup_norm = 0.0
+    return round(100.0 * (0.6 * ext_norm + 0.4 * runup_norm), 1)
+
+
 def all_time_high(df: pd.DataFrame, lookback: int | None = None) -> tuple[float, int]:
     """Return (ATH, bars_since_ATH) using the intraday ``high`` series.
 
@@ -77,6 +127,10 @@ class Metrics:
     pullback_from_ath_pct: float
     vol_avg: float
     vol_ratio: float
+    # Session 12: volatility-normalized extension. None when history is too thin.
+    atr: float | None = None
+    atr_pct: float | None = None
+    crowding: float | None = None
 
     @property
     def above_50_ema(self) -> bool | None:
@@ -113,6 +167,12 @@ def compute_metrics(df: pd.DataFrame, ath_lookback: int | None = None) -> Metric
     volume = float(last["volume"])
     pullback_pct = ((ath - close) / ath * 100.0) if ath else 0.0
 
+    atr_series = atr(df)
+    atr_last = atr_series.iloc[-1]
+    atr_val = None if pd.isna(atr_last) else float(atr_last)
+    atr_pct = (atr_val / close * 100.0) if (atr_val is not None and close) else None
+    crowding = crowding_score(df, e200, atr_val)
+
     return Metrics(
         n_bars=n,
         close=close,
@@ -132,4 +192,7 @@ def compute_metrics(df: pd.DataFrame, ath_lookback: int | None = None) -> Metric
         pullback_from_ath_pct=pullback_pct,
         vol_avg=vol_avg,
         vol_ratio=(volume / vol_avg) if vol_avg else 0.0,
+        atr=atr_val,
+        atr_pct=atr_pct,
+        crowding=crowding,
     )

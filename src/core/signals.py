@@ -21,7 +21,15 @@ from typing import Any
 import pandas as pd
 from loguru import logger
 
-from src.core import gating, market, regime as regime_mod, scorecard
+from src.core import (
+    accumulation as accumulation_mod,
+    gating,
+    market,
+    multitimeframe as mtf,
+    regime as regime_mod,
+    scorecard,
+    stage as stage_mod,
+)
 from src.core.backtest import HistoricalStat
 from src.core.config import settings
 from src.core.dossier import Dossier, DossierContext, build_dossier
@@ -404,8 +412,20 @@ class SignalEngine:
             best_sig, best_card = max(
                 cards, key=lambda sc: (_ACTION_RANK.get(sc[1].action, -1), sc[1].score)
             )
+            df = df_by_ticker[ticker]
+            # Session 12 deeper signals — pure/offline, computed per graded ticker.
+            stage = _safe_call(stage_mod.classify_stage, df, label="stage", default=None)
+            weekly = _safe_call(mtf.weekly_trend, df, label="weekly", default=None)
+            accumulation = _safe_call(
+                accumulation_mod.accumulation_score, df, label="accumulation", default=None
+            )
             ctx = DossierContext(
-                df=df_by_ticker[ticker], benchmarks=benchmarks, best_signal=best_sig
+                df=df,
+                benchmarks=benchmarks,
+                best_signal=best_sig,
+                stage=stage,
+                weekly=weekly,
+                accumulation=accumulation,
             )
             dossier = build_dossier(ticker, signals_by_ticker[ticker], best_card, ctx)
             out[ticker] = dossier

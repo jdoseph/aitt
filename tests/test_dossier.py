@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 
-from src.core import levels
+from src.core import levels, multitimeframe as mtf
+from src.core.accumulation import AccumulationResult
 from src.core.dossier import DossierContext, build_dossier
 from src.core.indicators import compute_metrics
 from src.core.scorecard import FAIL, PASS, WARN, Check, Scorecard
+from src.core.stage import StageResult
 from src.core.strategies.base import Signal
 from tests.factories import make_ohlcv
 
@@ -113,6 +115,53 @@ def test_invalidation_text_per_strategy() -> None:
     assert levels.invalidation_text(Signal("T", "ema_pullback", "AT_21_EMA")) == "close below the 21 EMA"
     assert "base" in levels.invalidation_text(Signal("T", "consolidation_breakout", "BREAKOUT"))
     assert "swing low" in levels.invalidation_text(Signal("T", "ath_pullback", "ENTRY_ZONE"))
+
+
+# --- Session 12: deeper-signal integration --------------------------------- #
+def test_stage_4_caps_grade_and_adds_bear() -> None:
+    df = _uptrend()
+    sig = Signal("T", "ema_pullback", "AT_21_EMA")
+    card = _card("HIGH-QUALITY", Check("trend", PASS, "above 50 EMA"))
+    stage4 = StageResult(4, "declining", above_ma=False, slope_pct=-3.0)
+    d = build_dossier("T", [sig], card, DossierContext(df=df, best_signal=sig, stage=stage4))
+    assert d.grade == "MARGINAL"  # capped down from HIGH-QUALITY
+    assert d.trade_plan.sizing_tier == "STARTER"
+    assert any("Stage 4" in r for r in d.reasons_not_to_buy)
+
+
+def test_stage_2_adds_bull_reason_without_capping() -> None:
+    df = _uptrend()
+    sig = Signal("T", "ema_pullback", "AT_21_EMA")
+    card = _card("DECENT", Check("trend", PASS, "above 50 EMA"))
+    stage2 = StageResult(2, "advancing", above_ma=True, slope_pct=3.0)
+    d = build_dossier("T", [sig], card, DossierContext(df=df, best_signal=sig, stage=stage2))
+    assert d.grade == "DECENT"
+    assert any("Stage 2" in r for r in d.reasons_to_buy)
+
+
+def test_weekly_uptrend_and_accumulation_become_bull() -> None:
+    df = _uptrend()
+    sig = Signal("T", "ema_pullback", "AT_21_EMA")
+    card = _card("DECENT", Check("trend", PASS, "above 50 EMA"))
+    wt = mtf.WeeklyTrend(mtf.UPTREND, above_ma=True, slope_pct=2.0, ma=100.0, n_weeks=40)
+    acc = AccumulationResult(score=75.0, label="accumulation", obv_rising=True,
+                             ad_rising=True, ud_ratio=2.0, close_pos=0.9)
+    d = build_dossier("T", [sig], card,
+                      DossierContext(df=df, best_signal=sig, weekly=wt, accumulation=acc))
+    assert any("Weekly uptrend" in r for r in d.reasons_to_buy)
+    assert any("accumulation" in r.lower() for r in d.reasons_to_buy)
+
+
+def test_high_crowding_adds_bear_reason() -> None:
+    # Steep, low-volatility ramp -> price sits many ATRs above a lagging 200 EMA.
+    closes = [100.0 + i * 2 for i in range(260)]
+    df = make_ohlcv(closes, highs=[c + 0.1 for c in closes], lows=[c - 0.1 for c in closes])
+    m = compute_metrics(df)
+    assert m.crowding is not None and m.crowding >= 70  # precondition for this fixture
+    sig = Signal("T", "ema_pullback", "AT_21_EMA")
+    d = build_dossier("T", [sig], _card("DECENT", Check("trend", PASS, "x")),
+                      DossierContext(df=df, best_signal=sig))
+    assert any("Crowded" in r for r in d.reasons_not_to_buy)
 
 
 # --- serialization --------------------------------------------------------- #
