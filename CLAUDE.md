@@ -279,13 +279,15 @@ Build this project across **9 sequential sessions**. Each session is self-contai
 
 **Goal:** Add the two evidence checks — historical win-rate for the *exact* setup, and recent catalysts — so the final alert is backed by base rates and a reason for the move. Both degrade gracefully (status `n/a`, never fail the cycle) when data is thin.
 
+> **Resolved 2026-05-29:** (1) Backtest **occurrences are counted on the transition into a status** (matches the alert model), with **close-to-close** forward returns and "win" = positive return. (2) Backtest window = **3 years** (`backtest_history_period="3y"`); headline horizon = **20-day** (all of 5/10/20 shown). (3) Historical-edge grade: **≥60% win = pass, 50–60% = warn, <50% = fail**, `n/a` below the minimum sample. (4) **Catalysts grade ONLY on confirmed earnings beat/miss** (reported vs estimate EPS) — **raw headlines never move the grade** (no NLP). Headlines are surfaced as context ("why is it moving?"). *Guidance changes have no free structured source, so they're shown as context only when they appear in headlines, not graded.* (5) Backtest replays via the cheaper `strategy.classify` (no candlestick detection); first run is slow per setup, then served from the `backtest_stats` cache.
+
 **Build:**
-- `src/core/backtest.py` — historical signal replay: for a (ticker, strategy, status), fetch extended history (`backtest_history_period`, ~2–5y daily), find prior occurrences of that status, and measure forward 5/10/20-day returns → `win_rate`, `avg_return`, `n`. Cache in a `backtest_stats` table; refresh when older than `backtest_refresh_days`.
-- `src/core/news.py` — recent headlines via yfinance `Ticker.news` (last `news_days`, default 7) → `[{title, publisher, published, link}]`; plus an **earnings-beat heuristic** from `get_earnings_dates` (actual vs estimate) → "beat / missed last earnings". **No NLP / sentiment.** Returns "No known catalyst" when empty.
-- Extend `scorecard.py` with checks 9 (historical edge) and 10 (catalysts) — additive; `n/a` when below `backtest_min_occurrences` or no news.
-- `storage.py` — `backtest_stats` table + read/write helpers.
+- `src/core/backtest.py` — historical signal replay: for a (ticker, strategy, status), fetch 3y daily history, replay `strategy.classify` bar-by-bar to find **transitions into** that status, and measure forward 5/10/20-day close-to-close returns → per-horizon `win_rate`, `avg_return`, `n`. Cache in a `backtest_stats` table; refresh when older than `backtest_refresh_days`.
+- `src/core/news.py` — recent headlines via yfinance `Ticker.news` (last `news_days`, default 7) → `[{title, publisher, published, link}]` (context only); plus `earnings_beat(ticker)` from `get_earnings_dates` (reported vs estimate EPS) → `"beat" | "miss" | "inline" | None`. **No NLP / sentiment.** Returns "No known catalyst" when empty.
+- Extend `scorecard.py` with check 9 (historical edge — graded on the 20-day win rate) and check 10 (catalyst — graded **only** on earnings beat/miss: beat=pass, miss=warn, else `n/a`). Both additive; `n/a` when data is thin.
+- `storage.py` — `backtest_stats` table (ticker, strategy, status, horizon, n, wins, win_rate, avg_return, computed_at) + read/write helpers.
 - Dashboard — **Chart** page shows the historical-edge stat + a recent-headlines list; **Alerts** shows win-rate + top catalyst; composite alert gains the two rows.
-- `config.py` — `backtest_history_period` ("5y"), `backtest_horizons` ([5,10,20]), `backtest_min_occurrences` (5), `backtest_refresh_days` (7), `news_days` (7), `news_max_items` (5).
+- `config.py` — `backtest_history_period` ("3y"), `backtest_horizons` ([5,10,20]), `backtest_primary_horizon` (20), `backtest_min_occurrences` (5), `backtest_refresh_days` (7), `backtest_win_pass_pct` (60), `backtest_win_warn_pct` (50), `news_days` (7), `news_max_items` (5).
 - Tests: `test_backtest.py` (synthetic history with engineered forward outcomes → known win rate), `test_news.py` (mocked yfinance `news` / earnings).
 
 **Verify before moving on:**

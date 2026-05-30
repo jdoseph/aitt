@@ -64,6 +64,22 @@ class SignalRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class BacktestStat(SQLModel, table=True):
+    """Cached historical win-rate for a (ticker, strategy, status, horizon)."""
+
+    __tablename__ = "backtest_stats"
+
+    ticker: str = Field(primary_key=True)
+    strategy: str = Field(primary_key=True)
+    status: str = Field(primary_key=True)
+    horizon: int = Field(primary_key=True)
+    n: int = 0
+    wins: int = 0
+    win_rate: float = 0.0  # percent
+    avg_return: float = 0.0  # percent
+    computed_at: datetime = Field(default_factory=_utcnow)
+
+
 class AlertRecord(SQLModel, table=True):
     """A fired alert (a noteworthy signal transition)."""
 
@@ -276,3 +292,24 @@ class Storage:
             s.add(rec)
             s.commit()
             return True
+
+    # --- backtest stats --------------------------------------------------- #
+    def get_backtest_stats(self, ticker: str, strategy: str, status: str) -> list[BacktestStat]:
+        with self.session() as s:
+            return list(
+                s.exec(
+                    select(BacktestStat).where(
+                        BacktestStat.ticker == ticker.upper(),
+                        BacktestStat.strategy == strategy,
+                        BacktestStat.status == status,
+                    )
+                ).all()
+            )
+
+    def upsert_backtest_stats(self, stats: Sequence[BacktestStat]) -> int:
+        with self.session() as s:
+            for st in stats:
+                st.ticker = st.ticker.upper()
+                s.merge(st)
+            s.commit()
+        return len(stats)

@@ -56,6 +56,26 @@ def render() -> None:
         with st.container(border=True):
             scorecard.render_scorecard(best)
 
+    # Catalysts: earnings beat/miss + recent headlines (context only).
+    catalysts = next(
+        (c for rec in sigs.values() if (c := json.loads(rec.details or "{}").get("catalysts"))),
+        None,
+    )
+    if catalysts:
+        with st.expander("📰 Catalysts — why might it be moving?", expanded=False):
+            beat = catalysts.get("beat")
+            if beat:
+                st.write(f"**Last earnings:** {beat}")
+            headlines = catalysts.get("headlines") or []
+            if headlines:
+                for h in headlines:
+                    title, pub = h.get("title", ""), h.get("publisher", "")
+                    link = h.get("link", "")
+                    label = f"[{title}]({link})" if link else title
+                    st.markdown(f"- {label}  \n  <small>{pub} · {h.get('published', '')[:10]}</small>", unsafe_allow_html=True)
+            elif not beat:
+                st.caption("No known catalyst.")
+
     legend.render_chart_legend()
 
     fig = charts.build_price_chart(ticker, df, sigs, alerts, last_n=int(last_n))

@@ -21,6 +21,7 @@ import pandas as pd
 from loguru import logger
 
 from src.core import market, scorecard
+from src.core.backtest import HistoricalStat
 from src.core.config import settings
 from src.core.scorecard import ScoreContext
 from src.core.storage import Storage
@@ -36,6 +37,15 @@ GRADEABLE_STATUSES: frozenset[str] = frozenset(
     {"AT_9_EMA", "AT_21_EMA", "ENTRY_ZONE", "DEEP_PULLBACK", "BREAKOUT", "IPO_BREAKOUT"}
 )
 _ACTION_RANK = {"HIGH-QUALITY": 3, "DECENT": 2, "MARGINAL": 1, "AVOID": 0}
+
+
+def _safe_call(fn: Callable[..., Any], *args: Any, label: str, default: Any) -> Any:
+    """Call a (possibly network) provider, logging and swallowing failures."""
+    try:
+        return fn(*args)
+    except Exception as exc:  # noqa: BLE001 - provider resilience boundary
+        logger.debug("{} provider failed for {}: {}", label, args, exc)
+        return default
 
 DEFAULT_STRATEGIES: tuple[type[Strategy], ...] = (
     EMAPullbackStrategy,
@@ -177,6 +187,9 @@ class SignalEngine:
         watchlist: Watchlist | None = None,
         benchmark_provider: Callable[[], dict[str, pd.DataFrame]] | None = None,
         earnings_provider: Callable[[str], int | None] | None = None,
+        historical_provider: Callable[[str, str, str], HistoricalStat | None] | None = None,
+        earnings_beat_provider: Callable[[str], str | None] | None = None,
+        news_provider: Callable[[str], list[dict[str, Any]]] | None = None,
         enable_scorecard: bool | None = None,
     ) -> None:
         self.store = store
@@ -184,6 +197,10 @@ class SignalEngine:
         self._watchlist = watchlist
         self.benchmark_provider = benchmark_provider or (lambda: {})
         self.earnings_provider = earnings_provider or (lambda _t: None)
+        # Session 8 evidence providers (default no-ops keep the engine offline in tests).
+        self.historical_provider = historical_provider or (lambda _t, _s, _st: None)
+        self.earnings_beat_provider = earnings_beat_provider or (lambda _t: None)
+        self.news_provider = news_provider or (lambda _t: [])
         self.enable_scorecard = (
             settings.enable_scorecard if enable_scorecard is None else enable_scorecard
         )
@@ -212,6 +229,8 @@ class SignalEngine:
         layer_of = {e.ticker: e.layer for e in self._watchlist_or_load().entries}
         benchmarks = self.benchmark_provider() if self.enable_scorecard else {}
         earnings_cache: dict[str, int | None] = {}
+        beat_cache: dict[str, str | None] = {}
+        news_cache: dict[str, list[dict[str, Any]]] = {}
 
         # --- pass 2: score, persist, alert ---
         for ev in evaluated:
@@ -219,8 +238,11 @@ class SignalEngine:
             card = None
             details = dict(sig.details)
             if self.enable_scorecard and sig.status in GRADEABLE_STATUSES:
-                card = self._score(ev, ctx_market, benchmarks, layer_of, earnings_cache)
+                card = self._score(ev, ctx_market, benchmarks, layer_of, earnings_cache, beat_cache)
                 details["scorecard"] = card.to_summary()
+                catalysts = self._catalysts(ev.ticker, beat_cache, news_cache)
+                if catalysts["beat"] or catalysts["headlines"]:
+                    details["catalysts"] = catalysts
 
             prev = self.store.latest_signal(ev.ticker, strat.name)
             prev_status = prev.status if prev else None
@@ -284,21 +306,47 @@ class SignalEngine:
         benchmarks: dict[str, pd.DataFrame],
         layer_of: dict[str, str],
         earnings_cache: dict[str, int | None],
+        beat_cache: dict[str, str | None],
     ) -> scorecard.Scorecard:
-        if ev.ticker not in earnings_cache:
-            try:
-                earnings_cache[ev.ticker] = self.earnings_provider(ev.ticker)
-            except Exception as exc:  # noqa: BLE001 - earnings is best-effort
-                logger.debug("earnings provider failed for {}: {}", ev.ticker, exc)
-                earnings_cache[ev.ticker] = None
+        t = ev.ticker
+        if t not in earnings_cache:
+            earnings_cache[t] = _safe_call(self.earnings_provider, t, label="earnings", default=None)
+        if t not in beat_cache:
+            beat_cache[t] = _safe_call(self.earnings_beat_provider, t, label="earnings_beat", default=None)
+        hist = _safe_call(
+            self.historical_provider, t, ev.strategy.name, ev.signal.status,
+            label="historical", default=None,
+        )
         ctx = ScoreContext(
             benchmarks=benchmarks,
-            earnings_days=earnings_cache[ev.ticker],
+            earnings_days=earnings_cache[t],
             breadth=ctx_market.breadth,
             leading_layers=ctx_market.leading_layers,
-            ticker_layer=layer_of.get(ev.ticker),
+            ticker_layer=layer_of.get(t),
+            historical=hist,
+            earnings_beat=beat_cache[t],
         )
         return scorecard.build_scorecard(ev.signal, ev.df, ctx)
+
+    def _catalysts(
+        self,
+        ticker: str,
+        beat_cache: dict[str, str | None],
+        news_cache: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Earnings beat/miss + recent headlines (context) for storage/dashboard."""
+        if ticker not in news_cache:
+            news_cache[ticker] = _safe_call(self.news_provider, ticker, label="news", default=[])
+        headlines = [
+            {
+                "title": h.get("title", ""),
+                "publisher": h.get("publisher", ""),
+                "published": h["published"].isoformat() if h.get("published") else "",
+                "link": h.get("link", ""),
+            }
+            for h in news_cache[ticker]
+        ]
+        return {"beat": beat_cache.get(ticker), "headlines": headlines}
 
     @staticmethod
     def _safe_evaluate(strat: Strategy, ticker: str, df: pd.DataFrame) -> Signal | None:

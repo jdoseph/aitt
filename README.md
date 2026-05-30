@@ -77,5 +77,5 @@ uv run mypy src           # strict type check
 - [x] **Session 5** — Streamlit dashboard (overview, chart, value chain, alerts)
 - [ ] Session 6 — testing, edge cases, polish
 - [x] **Session 7** — setup quality scorecard (trend / volume / earnings / rel-strength / R:R / resistance / leading layer / breadth) + composite grade
-- [ ] Session 8 — evidence layer: historical win-rate replay + catalysts (headlines)
+- [x] **Session 8** — evidence layer: historical win-rate replay + catalysts (earnings beat/miss + headlines)
 - [ ] Session 9 — trade due diligence dossier: bull vs bear case ("why NOT buy?") + trade plan (stop/invalidation/targets/sizing)

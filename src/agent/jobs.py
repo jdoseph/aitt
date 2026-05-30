@@ -11,7 +11,8 @@ import pandas as pd
 from loguru import logger
 
 from src.agent import notify
-from src.core import benchmarks, earnings
+from src.core import backtest, benchmarks, earnings, news
+from src.core.config import settings
 from src.core.data import fetch_many
 from src.core.signals import CycleResult, SignalEngine
 from src.core.storage import Storage
@@ -34,12 +35,21 @@ def evaluate_signals(
     if price_map is None:
         price_map = {t: store.get_prices(t) for t in load_watchlist().tickers}
         price_map = {t: df for t, df in price_map.items() if not df.empty}
-    # Wire in the real (network) scorecard providers; the engine fetches benchmarks
-    # once and earnings per gradeable ticker (cached).
+    # Wire in the real (network) scorecard + evidence providers. The engine fetches
+    # benchmarks once and earnings/news per gradeable ticker; the historical backtest
+    # is cached in the DB and refreshed weekly.
+    fetcher = backtest.make_fetcher()
     engine = SignalEngine(
         store,
         benchmark_provider=benchmarks.fetch_benchmarks,
         earnings_provider=earnings.days_to_earnings,
+        historical_provider=(
+            (lambda t, s, st: backtest.compute_stats(t, s, st, store=store, fetcher=fetcher))
+            if settings.enable_backtest
+            else None
+        ),
+        earnings_beat_provider=news.earnings_beat,
+        news_provider=news.recent_headlines,
     )
     return engine.run_cycle(price_map)
 

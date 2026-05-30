@@ -18,6 +18,7 @@ import pandas as pd
 
 from src.core import benchmarks as bm
 from src.core import levels
+from src.core.backtest import HistoricalStat
 from src.core.config import settings
 from src.core.indicators import compute_metrics
 from src.core.market import Breadth
@@ -35,6 +36,8 @@ CHECK_TITLES: dict[str, str] = {
     "resistance": "Resistance",
     "layer": "Leading layer",
     "breadth": "AI breadth",
+    "historical": "Hist. edge",
+    "catalyst": "Catalyst",
 }
 
 _ACTIONS = ["AVOID", "MARGINAL", "DECENT", "HIGH-QUALITY"]
@@ -57,6 +60,9 @@ class ScoreContext:
     breadth: Breadth | None = None
     leading_layers: frozenset[str] = frozenset()
     ticker_layer: str | None = None
+    # Session 8 evidence inputs (None => the corresponding check is n/a).
+    historical: HistoricalStat | None = None
+    earnings_beat: str | None = None  # "beat" | "miss" | "inline" | None
 
 
 @dataclass(frozen=True)
@@ -169,6 +175,31 @@ def _check_breadth(breadth: Breadth | None) -> Check:
     return Check("breadth", PASS, value) if breadth.healthy else Check("breadth", WARN, value)
 
 
+def _check_historical(hist: HistoricalStat | None) -> Check:
+    if hist is None:
+        return Check("historical", NA, "n/a")
+    ps = hist.primary()
+    if ps is None or ps.n < settings.backtest_min_occurrences:
+        return Check("historical", NA, f"n/a (n={ps.n if ps else 0})")
+    value = f"{ps.win_rate:.0f}% win ({ps.horizon}d, n={ps.n})"
+    if ps.win_rate >= settings.backtest_win_pass_pct:
+        return Check("historical", PASS, value)
+    if ps.win_rate >= settings.backtest_win_warn_pct:
+        return Check("historical", WARN, value)
+    return Check("historical", FAIL, value)
+
+
+def _check_catalyst(earnings_beat: str | None) -> Check:
+    # Graded ONLY on the structured earnings beat/miss — headlines are context.
+    if earnings_beat == "beat":
+        return Check("catalyst", PASS, "beat last earnings")
+    if earnings_beat == "miss":
+        return Check("catalyst", WARN, "missed last earnings")
+    if earnings_beat == "inline":
+        return Check("catalyst", NA, "in-line last earnings")
+    return Check("catalyst", NA, "no earnings data")
+
+
 # --------------------------------------------------------------------------- #
 # Assembly + grading
 # --------------------------------------------------------------------------- #
@@ -216,6 +247,8 @@ def build_scorecard(signal: Signal, df: pd.DataFrame, ctx: ScoreContext) -> Scor
         _check_risk_reward(df, m, target),
         _check_layer(ctx.ticker_layer, ctx.leading_layers),
         _check_breadth(ctx.breadth),
+        _check_historical(ctx.historical),
+        _check_catalyst(ctx.earnings_beat),
     ]
     score, action = _grade(checks)
     return Scorecard(checks=checks, score=score, action=action)

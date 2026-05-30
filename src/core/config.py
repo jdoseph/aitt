@@ -85,6 +85,19 @@ class Settings(BaseSettings):
     leading_layers_top_n: int = 3
     enable_scorecard: bool = True
 
+    # --- Session 8: evidence layer (historical edge + catalysts) ---
+    enable_backtest: bool = True
+    backtest_history_period: str = "3y"
+    backtest_history_bars: int = 780  # ~3 years of trading days to fetch for replay
+    backtest_horizons: list[int] = Field(default_factory=lambda: [5, 10, 20])
+    backtest_primary_horizon: int = 20
+    backtest_min_occurrences: int = 5
+    backtest_refresh_days: int = 7
+    backtest_win_pass_pct: float = 60.0
+    backtest_win_warn_pct: float = 50.0
+    news_days: int = 7
+    news_max_items: int = 5
+
     # --- alerts ---
     min_confidence_stars: int = 1
     alert_desktop: bool = True
