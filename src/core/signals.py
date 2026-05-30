@@ -23,14 +23,22 @@ from loguru import logger
 
 from src.core import (
     accumulation as accumulation_mod,
+    benchmarks as bm,
     gating,
     market,
     multitimeframe as mtf,
+    ranking,
     regime as regime_mod,
     scorecard,
+    scoring,
     stage as stage_mod,
 )
+from src.core.accumulation import AccumulationResult
 from src.core.backtest import HistoricalStat
+from src.core.indicators import compute_metrics
+from src.core.market import ThesisHealth
+from src.core.ranking import RankedOpportunity, ScoredName
+from src.core.stage import StageResult
 from src.core.config import settings
 from src.core.dossier import Dossier, DossierContext, build_dossier
 from src.core.regime import Regime
@@ -86,6 +94,15 @@ class Alert:
     bear_reasons: list[str] = field(default_factory=list)  # top "why NOT buy" factors
     regime: str = ""  # market-regime label at fire time
     gate_flags: list[str] = field(default_factory=list)  # disqualifiers (downgrade mode)
+    score: float | None = None  # 0-100 composite (Session 11)
+    rank: int | None = None  # cross-sectional rank, 1 = best
+    n_ranked: int = 0  # cohort size for the rank
+
+    def score_label(self) -> str:
+        """e.g. 'NVDA 91/100 · #2 of 41' — empty when unscored."""
+        if self.score is None or self.rank is None:
+            return ""
+        return f"{self.score:.0f}/100 · #{self.rank} of {self.n_ranked}"
 
 
 @dataclass
@@ -101,6 +118,13 @@ class CycleResult:
     regime_label: str = regime_mod.NEUTRAL
     regime_summary: str = ""
     n_suppressed: int = 0  # alerts suppressed by the regime gate / disqualifiers
+    # Session 11: cross-sectional scoring + rotation.
+    scores: dict[str, float] = field(default_factory=dict)  # ticker -> composite
+    ranked: list[RankedOpportunity] = field(default_factory=list)  # best -> worst
+    allocation: dict[str, float] = field(default_factory=dict)  # ticker -> suggested %
+    layer_strength: dict[str, float] = field(default_factory=dict)
+    layer_rotation: dict[str, float] = field(default_factory=dict)
+    thesis: ThesisHealth | None = None
 
 
 def _stars(n: int) -> str:
@@ -210,6 +234,31 @@ def _cap_action(action: str | None, ceiling: str) -> str | None:
     if action is None or action not in _ACTION_ORDER or ceiling not in _ACTION_ORDER:
         return action
     return action if _ACTION_ORDER.index(action) <= _ACTION_ORDER.index(ceiling) else ceiling
+
+
+@dataclass(frozen=True)
+class _DeepSignals:
+    """Session 12 deeper signals for one ticker (computed once, reused everywhere)."""
+
+    stage: StageResult | None = None
+    weekly: mtf.WeeklyTrend | None = None
+    accumulation: AccumulationResult | None = None
+    crowding: float | None = None
+
+
+def _compute_deep(df: pd.DataFrame) -> _DeepSignals:
+    stage = _safe_call(stage_mod.classify_stage, df, label="stage", default=None)
+    weekly = _safe_call(mtf.weekly_trend, df, label="weekly", default=None)
+    accumulation = _safe_call(
+        accumulation_mod.accumulation_score, df, label="accumulation", default=None
+    )
+    m = _safe_call(compute_metrics, df, label="metrics", default=None)
+    return _DeepSignals(
+        stage=stage,
+        weekly=weekly,
+        accumulation=accumulation,
+        crowding=None if m is None else m.crowding,
+    )
 
 
 class SignalEngine:
@@ -349,16 +398,35 @@ class SignalEngine:
                     )
                 )
 
+        # --- deeper signals computed once per graded ticker (Sessions 11/12) ---
+        deep_by_ticker = {t: _compute_deep(df_by_ticker[t]) for t in cards_by_ticker}
+
         # --- dossiers: one per graded ticker (bull/bear case + trade plan) ---
         dossiers = self._build_dossiers(
-            cards_by_ticker, signals_by_ticker, df_by_ticker, date_by_ticker, benchmarks
+            cards_by_ticker, signals_by_ticker, df_by_ticker, date_by_ticker,
+            benchmarks, deep_by_ticker,
         )
         result.dossiers = dossiers
 
-        # --- finalize alerts, folding in each ticker's "why NOT buy" factors ---
+        # --- composite score + cross-sectional ranking (Session 11) ---
+        scores, ranked, allocation = self._score_and_rank(
+            cards_by_ticker, df_by_ticker, deep_by_ticker, benchmarks, layer_of,
+            regime.label, result.bar_date,
+        )
+        result.scores, result.ranked, result.allocation = scores, ranked, allocation
+        rank_by_ticker = {r.ticker: r for r in ranked}
+
+        # --- layer strength + rotation + AI-thesis health (Session 11) ---
+        all_signals = [e.signal for e in evaluated]
+        result.layer_strength, result.layer_rotation, result.thesis = self._layers_and_thesis(
+            all_signals, price_map, result.bar_date
+        )
+
+        # --- finalize alerts, folding in "why NOT buy" + composite score/rank ---
         for p in pending:
             dossier = dossiers.get(p.ev.ticker)
             card = p.card
+            ro = rank_by_ticker.get(p.ev.ticker)
             result.alerts.append(
                 Alert(
                     ticker=p.ev.ticker,
@@ -374,6 +442,9 @@ class SignalEngine:
                     bear_reasons=dossier.top_bear() if dossier else [],
                     regime=regime.label,
                     gate_flags=p.gate_flags,
+                    score=ro.score if ro else None,
+                    rank=ro.rank if ro else None,
+                    n_ranked=ro.n if ro else 0,
                 )
             )
 
@@ -405,6 +476,7 @@ class SignalEngine:
         df_by_ticker: dict[str, pd.DataFrame],
         date_by_ticker: dict[str, Date],
         benchmarks: dict[str, pd.DataFrame],
+        deep_by_ticker: dict[str, _DeepSignals],
     ) -> dict[str, Dossier]:
         """Build + persist one dossier per graded ticker (using its best scorecard)."""
         out: dict[str, Dossier] = {}
@@ -412,20 +484,14 @@ class SignalEngine:
             best_sig, best_card = max(
                 cards, key=lambda sc: (_ACTION_RANK.get(sc[1].action, -1), sc[1].score)
             )
-            df = df_by_ticker[ticker]
-            # Session 12 deeper signals — pure/offline, computed per graded ticker.
-            stage = _safe_call(stage_mod.classify_stage, df, label="stage", default=None)
-            weekly = _safe_call(mtf.weekly_trend, df, label="weekly", default=None)
-            accumulation = _safe_call(
-                accumulation_mod.accumulation_score, df, label="accumulation", default=None
-            )
+            deep = deep_by_ticker[ticker]
             ctx = DossierContext(
-                df=df,
+                df=df_by_ticker[ticker],
                 benchmarks=benchmarks,
                 best_signal=best_sig,
-                stage=stage,
-                weekly=weekly,
-                accumulation=accumulation,
+                stage=deep.stage,
+                weekly=deep.weekly,
+                accumulation=deep.accumulation,
             )
             dossier = build_dossier(ticker, signals_by_ticker[ticker], best_card, ctx)
             out[ticker] = dossier
@@ -438,6 +504,75 @@ class SignalEngine:
                 summary=dossier.to_summary(),
             )
         return out
+
+    def _score_and_rank(
+        self,
+        cards_by_ticker: dict[str, list[tuple[Signal, scorecard.Scorecard]]],
+        df_by_ticker: dict[str, pd.DataFrame],
+        deep_by_ticker: dict[str, _DeepSignals],
+        benchmarks: dict[str, pd.DataFrame],
+        layer_of: dict[str, str],
+        regime_label: str,
+        bar_date: Date | None,
+    ) -> tuple[dict[str, float], list[RankedOpportunity], dict[str, float]]:
+        """Composite score + cross-sectional rank for every graded ticker."""
+        capex_of = {e.ticker: e.capex_exposure for e in self._watchlist_or_load().entries}
+        scored: list[ScoredName] = []
+        scores: dict[str, float] = {}
+        for ticker, cards in cards_by_ticker.items():
+            _, best_card = max(
+                cards, key=lambda sc: (_ACTION_RANK.get(sc[1].action, -1), sc[1].score)
+            )
+            deep = deep_by_ticker[ticker]
+            cs = scoring.composite_score(
+                scoring.CompositeInputs(
+                    scorecard=best_card,
+                    regime_label=regime_label,
+                    accumulation=deep.accumulation,
+                    stage=deep.stage,
+                    crowding=deep.crowding,
+                    capex_exposure=capex_of.get(ticker),
+                )
+            )
+            scores[ticker] = cs.score
+            rs = bm.relative_strength_all(df_by_ticker[ticker], benchmarks)
+            rs_value = (sum(r.delta for r in rs) / len(rs)) if rs else None
+            scored.append(ScoredName(ticker=ticker, score=cs.score, rs_value=rs_value))
+
+        ranked = ranking.rank_opportunities(scored)
+        allocation = ranking.suggest_allocation(ranked)
+        if bar_date is not None:
+            for ro in ranked:
+                self.store.upsert_daily_score(
+                    ticker=ro.ticker, date=bar_date, score=ro.score, rank=ro.rank,
+                    n=ro.n, rs_percentile=ro.rs_percentile or 0.0,
+                )
+        return scores, ranked, allocation
+
+    def _layers_and_thesis(
+        self,
+        signals: list[Signal],
+        price_map: dict[str, pd.DataFrame],
+        bar_date: Date | None,
+    ) -> tuple[dict[str, float], dict[str, float], ThesisHealth]:
+        """Layer-strength scores, the rotation delta vs the prior cycle, and thesis health."""
+        wl = self._watchlist_or_load()
+        strength = market.layer_strength(signals, wl)
+        prior = self.store.prior_layer_strength(bar_date) if bar_date is not None else {}
+        rotation = market.layer_rotation(strength, prior)
+        if bar_date is not None:
+            for layer, val in strength.items():
+                self.store.upsert_layer_strength(date=bar_date, layer=layer, strength=val)
+
+        above_50: dict[str, bool | None] = {}
+        for leader in settings.thesis_leaders:
+            df = price_map.get(leader)
+            if df is None:
+                continue
+            m = _safe_call(compute_metrics, df, label="thesis_metrics", default=None)
+            above_50[leader] = None if m is None else m.above_50_ema
+        thesis = market.thesis_health(above_50)
+        return strength, rotation, thesis
 
     def _gate(
         self,

@@ -106,6 +106,31 @@ class RegimeRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class DailyScore(SQLModel, table=True):
+    """A ticker's composite score + cross-sectional rank for a day (Session 11)."""
+
+    __tablename__ = "daily_scores"
+
+    ticker: str = Field(primary_key=True)
+    date: Date = Field(primary_key=True)
+    score: float = 0.0  # 0-100 composite
+    rank: int = 0  # 1 = best that day
+    n: int = 0  # cohort size
+    rs_percentile: float = 0.0
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class LayerStrengthRecord(SQLModel, table=True):
+    """Per-layer 0-100 strength for a day (Session 11) — powers rotation deltas."""
+
+    __tablename__ = "layer_strength"
+
+    date: Date = Field(primary_key=True)
+    layer: str = Field(primary_key=True)
+    strength: float = 0.0
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class AlertRecord(SQLModel, table=True):
     """A fired alert (a noteworthy signal transition)."""
 
@@ -371,6 +396,87 @@ class Storage:
         """Most recent stored market-regime label (None if never computed)."""
         with self.session() as s:
             return s.exec(select(RegimeRecord).order_by(col(RegimeRecord.date).desc())).first()
+
+    # --- daily composite scores (Session 11) ------------------------------ #
+    def upsert_daily_score(
+        self,
+        *,
+        ticker: str,
+        date: Date,
+        score: float,
+        rank: int,
+        n: int,
+        rs_percentile: float = 0.0,
+    ) -> DailyScore:
+        """Upsert a ticker's composite score + rank, keyed by (ticker, date)."""
+        ticker = ticker.upper()
+        with self.session() as s:
+            rec = s.get(DailyScore, (ticker, date)) or DailyScore(ticker=ticker, date=date)
+            rec.score = score
+            rec.rank = rank
+            rec.n = n
+            rec.rs_percentile = rs_percentile
+            rec.created_at = _utcnow()
+            s.merge(rec)
+            s.commit()
+            return rec
+
+    def get_daily_scores(self, date: Date) -> list[DailyScore]:
+        """All composite scores for a day, best rank first."""
+        with self.session() as s:
+            return list(
+                s.exec(
+                    select(DailyScore)
+                    .where(DailyScore.date == date)
+                    .order_by(col(DailyScore.rank))
+                ).all()
+            )
+
+    def latest_daily_score(self, ticker: str) -> DailyScore | None:
+        with self.session() as s:
+            return s.exec(
+                select(DailyScore)
+                .where(DailyScore.ticker == ticker.upper())
+                .order_by(col(DailyScore.date).desc())
+            ).first()
+
+    # --- layer strength + rotation (Session 11) --------------------------- #
+    def upsert_layer_strength(self, *, date: Date, layer: str, strength: float) -> LayerStrengthRecord:
+        """Upsert one layer's strength for a day, keyed by (date, layer)."""
+        with self.session() as s:
+            rec = s.get(LayerStrengthRecord, (date, layer)) or LayerStrengthRecord(
+                date=date, layer=layer
+            )
+            rec.strength = strength
+            rec.created_at = _utcnow()
+            s.merge(rec)
+            s.commit()
+            return rec
+
+    def get_layer_strength(self, date: Date) -> dict[str, float]:
+        """All layer strengths on a given date as {layer: strength}."""
+        with self.session() as s:
+            rows = s.exec(
+                select(LayerStrengthRecord).where(LayerStrengthRecord.date == date)
+            ).all()
+        return {r.layer: r.strength for r in rows}
+
+    def prior_layer_strength(self, before: Date) -> dict[str, float]:
+        """Layer strengths from the most recent day strictly before ``before``."""
+        with self.session() as s:
+            latest_row = s.exec(
+                select(LayerStrengthRecord)
+                .where(col(LayerStrengthRecord.date) < before)
+                .order_by(col(LayerStrengthRecord.date).desc())
+            ).first()
+            if latest_row is None:
+                return {}
+            rows = s.exec(
+                select(LayerStrengthRecord).where(
+                    LayerStrengthRecord.date == latest_row.date
+                )
+            ).all()
+        return {r.layer: r.strength for r in rows}
 
     # --- backtest stats --------------------------------------------------- #
     def get_backtest_stats(self, ticker: str, strategy: str, status: str) -> list[BacktestStat]:

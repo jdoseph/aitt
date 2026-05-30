@@ -140,3 +140,26 @@ def test_acknowledge_alert(store: Storage) -> None:
 
 def test_acknowledge_missing_alert_returns_false(store: Storage) -> None:
     assert store.acknowledge_alert(9999) is False
+
+
+# --- daily scores + layer strength (Session 11) ---------------------------- #
+def test_upsert_and_get_daily_scores(store: Storage) -> None:
+    d = date(2026, 1, 5)
+    store.upsert_daily_score(ticker="NVDA", date=d, score=91.0, rank=1, n=3, rs_percentile=100.0)
+    store.upsert_daily_score(ticker="VRT", date=d, score=70.0, rank=2, n=3, rs_percentile=50.0)
+    rows = store.get_daily_scores(d)
+    assert [r.ticker for r in rows] == ["NVDA", "VRT"]  # ordered by rank
+    assert rows[0].score == 91.0
+    # upsert overwrites in place
+    store.upsert_daily_score(ticker="NVDA", date=d, score=88.0, rank=1, n=3)
+    assert store.latest_daily_score("NVDA").score == 88.0
+
+
+def test_layer_strength_rotation_window(store: Storage) -> None:
+    prior, today = date(2026, 1, 5), date(2026, 1, 6)
+    store.upsert_layer_strength(date=prior, layer="layer4", strength=50.0)
+    store.upsert_layer_strength(date=today, layer="layer4", strength=70.0)
+    assert store.get_layer_strength(today) == {"layer4": 70.0}
+    assert store.prior_layer_strength(today) == {"layer4": 50.0}
+    # no prior data before the earliest date
+    assert store.prior_layer_strength(prior) == {}

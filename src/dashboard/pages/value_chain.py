@@ -15,6 +15,27 @@ def render() -> None:
         st.warning("No data yet. Run `python -m src.agent --once` to populate the database.")
         return
 
+    # --- AI-thesis health + layer strength / rotation (Session 11) ---
+    view = data.layer_strength_view()
+    if view:
+        thesis_label = data.thesis_summary(view)
+        badge = "🟢" if thesis_label.startswith("Healthy") else "🔴"
+        st.markdown(f"### AI-thesis health: {badge} {thesis_label}")
+        rows = view.get("rows")
+        if rows is not None and not getattr(rows, "empty", True):
+            st.caption("Layer strength (0–100) and rotation Δ vs the prior cycle (▲ in / ▼ out).")
+            st.dataframe(
+                rows,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "strength": st.column_config.ProgressColumn(
+                        "strength", min_value=0, max_value=100, format="%.0f"
+                    ),
+                },
+            )
+        st.divider()
+
     st.caption(
         "Each layer shows how many of its names are at/approaching an entry "
         "(at EMA, ATH entry zone, or a breakout)."

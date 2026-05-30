@@ -12,9 +12,11 @@ from datetime import date as Date
 import pandas as pd
 import streamlit as st
 
-from src.core import market
+from src.core import market, ranking
+from src.core.config import settings
 from src.core.indicators import compute_metrics
-from src.core.market import MarketContext
+from src.core.market import MarketContext, ThesisHealth
+from src.core.ranking import RankedOpportunity
 from src.core.storage import DossierRecord, RegimeRecord, SignalRecord, Storage
 from src.core.watchlist import Watchlist, load_watchlist
 from src.dashboard.components import theme
@@ -78,6 +80,10 @@ def overview_table() -> pd.DataFrame:
         dossier = store.latest_dossier(entry.ticker)
         bear = dossier.strongest_bear if dossier else ""
 
+        ds = store.latest_daily_score(entry.ticker)
+        score = round(ds.score, 1) if ds else None
+        rank = ds.rank if ds else None
+
         # Disqualified marker: any latest signal suppressed by the regime gate.
         dq_reasons: list[str] = []
         for rec in sigs.values():
@@ -110,6 +116,8 @@ def overview_table() -> pd.DataFrame:
                 "IPO": theme.status_label(stat("ipo_base")) if "ipo_base" in sigs else "",
                 "conf": max_conf,
                 "stars": theme.stars(max_conf),
+                "score": score,
+                "rank": rank,
                 "action": _best_action(sigs),
                 "strongest_bear": bear,
                 "disqualified": ("🚫 " + "; ".join(dq_reasons)) if dq_reasons else "",
@@ -132,6 +140,72 @@ def market_context() -> MarketContext | None:
     if not records:
         return None
     return market.compute_context(records, wl)
+
+
+@st.cache_data(ttl=300)
+def top_opportunities() -> pd.DataFrame:
+    """Latest-day composite ranking + suggested allocation for the top N names."""
+    store, wl = get_store(), get_watchlist()
+    rows = [ds for t in wl.tickers if (ds := store.latest_daily_score(t)) is not None]
+    if not rows:
+        return pd.DataFrame()
+    latest = max(r.date for r in rows)
+    rows = [r for r in rows if r.date == latest]
+    ranked = sorted(
+        (RankedOpportunity(r.ticker, r.score, r.rank, r.n, r.rs_percentile) for r in rows),
+        key=lambda r: r.rank,
+    )
+    alloc = ranking.suggest_allocation(ranked, settings.top_opportunities_n)
+    name_of = {e.ticker: e.name for e in wl.entries}
+    out = [
+        {
+            "rank": r.rank,
+            "ticker": r.ticker,
+            "name": name_of.get(r.ticker, ""),
+            "score": round(r.score, 1),
+            "rs_pct": None if r.rs_percentile is None else round(r.rs_percentile, 0),
+            "allocation_%": round(alloc[r.ticker], 1),
+        }
+        for r in ranked[: settings.top_opportunities_n]
+        if r.ticker in alloc
+    ]
+    return pd.DataFrame(out)
+
+
+@st.cache_data(ttl=300)
+def layer_strength_view() -> dict[str, object]:
+    """Latest per-layer strength, rotation Δ vs the prior cycle, and thesis health."""
+    store, wl = get_store(), get_watchlist()
+    regime = store.latest_regime()
+    if regime is None:
+        return {}
+    strength = store.get_layer_strength(regime.date)
+    if not strength:
+        return {}
+    prior = store.prior_layer_strength(regime.date)
+    rotation = market.layer_rotation(strength, prior)
+
+    above_50: dict[str, bool | None] = {}
+    for leader in settings.thesis_leaders:
+        df = store.get_prices(leader)
+        above_50[leader] = None if df.empty else compute_metrics(df).above_50_ema
+    thesis = market.thesis_health(above_50)
+
+    rows = [
+        {
+            "layer": wl.layer_title(layer),
+            "strength": round(val, 0),
+            "rotation": market.rotation_arrow(rotation.get(layer, 0.0))
+            + f" {rotation.get(layer, 0.0):+.0f}",
+        }
+        for layer, val in sorted(strength.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+    return {"rows": pd.DataFrame(rows), "thesis": thesis}
+
+
+def thesis_summary(view: dict[str, object]) -> str:
+    thesis = view.get("thesis")
+    return thesis.summary() if isinstance(thesis, ThesisHealth) else "thesis unknown"
 
 
 @st.cache_data(ttl=300)

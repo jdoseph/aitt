@@ -8,6 +8,7 @@ import streamlit as st
 from src.dashboard.components import data, scorecard, theme
 
 _SORTS = {
+    "Composite score": ("score", False),
     "Setup quality": ("quality_rank", False),
     "Confidence (⭐ first)": ("conf", False),
     "Closest to 21 EMA": ("abs_dist_21", True),
@@ -35,7 +36,22 @@ def render() -> None:
     ctx = data.market_context()
     if ctx is not None:
         scorecard.render_market_header(ctx, data.get_watchlist())
-        st.divider()
+
+    top = data.top_opportunities()
+    if not top.empty:
+        st.subheader("🏆 Top opportunities today")
+        st.caption("Best composite scores across the watchlist, with a suggested allocation.")
+        st.dataframe(
+            top,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "score": st.column_config.NumberColumn("score", format="%.1f"),
+                "rs_pct": st.column_config.NumberColumn("RS %ile", format="%.0f"),
+                "allocation_%": st.column_config.NumberColumn("alloc %", format="%.1f"),
+            },
+        )
+    st.divider()
 
     # Derived sort helpers.
     df["abs_dist_21"] = df["dist_21_%"].abs()
@@ -72,7 +88,7 @@ def render() -> None:
 
     st.caption(f"{len(view)} of {len(df)} tickers")
     display_cols = [
-        "ticker", "name", "layer_title", "price", "chg_%",
+        "ticker", "name", "layer_title", "score", "rank", "price", "chg_%",
         "dist_9_%", "dist_21_%", "pullback_%", "EMA", "ATH", "FLAG", "IPO", "stars", "action",
         "disqualified", "strongest_bear",
     ]
@@ -83,6 +99,8 @@ def render() -> None:
         height=min(720, 80 + 35 * len(view)),
         column_config={
             "layer_title": st.column_config.TextColumn("layer"),
+            "score": st.column_config.NumberColumn("score", format="%.1f"),
+            "rank": st.column_config.NumberColumn("#", format="%d"),
             "chg_%": st.column_config.NumberColumn("chg %", format="%.2f"),
             "dist_9_%": st.column_config.NumberColumn("Δ9 %", format="%.2f"),
             "dist_21_%": st.column_config.NumberColumn("Δ21 %", format="%.2f"),

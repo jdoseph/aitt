@@ -129,6 +129,41 @@ def test_alerts_persisted_to_db(store: Storage) -> None:
     assert len(store.get_alerts()) >= 1
 
 
+# --- Session 11: composite score + ranking + rotation ---------------------- #
+def test_cycle_scores_ranks_and_layers(store: Storage) -> None:
+    # Use real watchlist tickers so layer + capex inputs flow into the composite.
+    result = SignalEngine(store).run_cycle(
+        {"NVDA": _breakout_frame(), "VRT": _fresh_entry_zone_frame()}
+    )
+    # Composite scores computed for graded tickers.
+    assert set(result.scores) == {"NVDA", "VRT"}
+    assert all(0.0 <= v <= 100.0 for v in result.scores.values())
+    # Cross-sectional ranking is ordered best -> worst and 1-indexed.
+    assert [r.rank for r in result.ranked] == [1, 2]
+    assert result.ranked[0].score >= result.ranked[1].score
+    # Suggested allocation sums to ~100%.
+    assert sum(result.allocation.values()) == pytest.approx(100.0)
+    # Alerts carry the score + rank label.
+    assert all(a.score is not None and a.rank is not None for a in result.alerts)
+    assert "of 2" in result.alerts[0].score_label()
+    # Layer strength + thesis health populated; scores persisted.
+    assert result.layer_strength  # at least one layer scored
+    assert result.thesis is not None
+    assert len(store.get_daily_scores(result.bar_date)) == 2
+
+
+def test_layer_rotation_delta_across_two_cycles(store: Storage) -> None:
+    from datetime import date as _date
+
+    engine = SignalEngine(store)
+    # Seed a prior day's layer strength so the next cycle has a rotation baseline.
+    store.upsert_layer_strength(date=_date(2020, 1, 1), layer="layer1", strength=10.0)
+    result = engine.run_cycle({"NVDA": _breakout_frame()})
+    assert "layer1" in result.layer_rotation
+    # NVDA breakout (bullish, high confidence) should read stronger than the seed.
+    assert result.layer_rotation["layer1"] > 0
+
+
 def test_dispatch_routes_to_notifiers() -> None:
     sent: list[Alert] = []
 

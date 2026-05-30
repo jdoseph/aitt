@@ -21,6 +21,9 @@ _SEVERITY_PREFIX = {"entry": "🟢 ENTRY", "secondary": "🟡 DIP", "warning": "
 def format_alert(alert: Alert) -> str:
     prefix = _SEVERITY_PREFIX.get(alert.severity, alert.severity.upper())
     head = f"[{prefix}] {alert.message}"
+    score_label = alert.score_label()
+    if score_label:
+        head += f"  |  {score_label}"
     if alert.action:
         head += f"  →  {alert.action}"
     return head

@@ -146,6 +146,23 @@ class Settings(BaseSettings):
     # AI-capex exposure default for watchlist entries that omit it (0-100).
     capex_exposure_default: int = 50
 
+    # --- Session 11: composite score + cross-sectional ranking + rotation ---
+    # Category weights for the 0-100 composite (should sum to 100; renormalized
+    # over the categories that have data so an n/a category degrades gracefully).
+    score_w_technical: float = 30.0
+    score_w_rel_strength: float = 20.0
+    score_w_volume_accum: float = 15.0
+    score_w_regime: float = 10.0
+    score_w_earnings: float = 10.0
+    score_w_layer: float = 10.0
+    score_w_catalyst: float = 5.0
+    top_opportunities_n: int = 5  # names shown in the "Top opportunities today" panel
+    rotation_lookback_days: int = 5  # window for the layer-strength rotation delta
+    # Key value-chain leaders whose 50-EMA hold defines AI-thesis health.
+    thesis_leaders: list[str] = Field(
+        default_factory=lambda: ["NVDA", "AVGO", "VRT", "ANET", "MSFT", "MU"]
+    )
+
     # --- alerts ---
     min_confidence_stars: int = 1
     alert_desktop: bool = True
