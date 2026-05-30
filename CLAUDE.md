@@ -22,7 +22,7 @@ The watchlist and value chain understanding is informed by:
 
 ## Working with this spec
 
-**This project is built across 12 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
+**This project is built across 14 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
 
 1. **Re-read this CLAUDE.md** — it may have been updated since the last session
 2. **Check the Open questions section** — resolve any 🔴 items before writing code if not yet answered
@@ -92,6 +92,10 @@ ai-infra-tracker/
 │   │   ├── accumulation.py     # OBV / A-D / up-down volume (Session 12)
 │   │   ├── multitimeframe.py   # Weekly trend alignment (Session 12)
 │   │   ├── stage.py            # Weinstein Stage 1-4 classification (Session 12)
+│   │   ├── portfolio.py        # Paper portfolio state, target weights, rebalance suggestions (S13)
+│   │   ├── exposure.py         # Regime → total-exposure dial + hysteresis (S13)
+│   │   ├── sizing.py           # Conviction sizing + RS rotation + concentration caps (S13)
+│   │   ├── backtest_portfolio.py  # Walk-forward portfolio backtest vs VOO (S14)
 │   │   └── storage.py          # SQLite ORM (SQLModel)
 │   ├── agent/
 │   │   ├── scheduler.py        # APScheduler entry point
@@ -124,9 +128,9 @@ ai-infra-tracker/
 
 ## Implementation sessions
 
-Build this project across **12 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
+Build this project across **14 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
 
-> **Status:** Sessions 1–5, **7**, **8**, **9**, **10**, **11**, and **12** are complete (on `main`). Remaining: **6** (hardening/polish) only. **Session 12 was built before 11** (its deeper-signal outputs — accumulation, weekly trend, Weinstein stage, ATR/crowding, capex_exposure — are inputs the Session 11 composite score consumes). Sessions 11–12 build on the scorecard (7), evidence (8), dossier (9), and regime gate (10). A deferred **v2 portfolio-aware track** is described after Session 12.
+> **Status:** **Sessions 1–12 are complete** (on `main`) — including Session 6 (hardening: rotating file-log sink, `python -m src.agent --validate`, `tests/test_resilience.py`, `justfile`). **Remaining: 13** (portfolio exposure management) and **14** (walk-forward backtest vs VOO) — the index-beating mechanism plus its validation; neither is built yet. **Session 12 was built before 11** (its deeper-signal outputs — accumulation, weekly trend, Weinstein stage, ATR/crowding, capex_exposure — are inputs the Session 11 composite score consumes). Sessions 11–12 build on the scorecard (7), evidence (8), dossier (9), and regime gate (10). A slimmed **v2 portfolio-aware track** (real-holdings exits, trade journal, Bayesian win-prob) is described after Session 14.
 >
 > **Note (Session 10 config):** the canonical RISK_ON/OFF gate uses `regime_gate_ema_span` (50). Session 9's *informational* 21-EMA line keeps `regime_ema_span` (21) — the two are intentionally separate knobs (the spec's "`regime_ema_span` (50)" for Session 10 was renamed to avoid clobbering Session 9's).
 >
@@ -405,16 +409,184 @@ Build this project across **12 sequential sessions**. Each session is self-conta
 
 ---
 
+> **Read first — what Sessions 13–14 are and why they're different:**
+> Sessions 1–12 make the agent a great *scanner and grader* of individual setups. None of them
+> change the fact that the agent is **stateless about exposure** — it finds setups but has no
+> concept of "how much should I be invested right now" or "which of my held names should I cut."
+> Beating the index requires the one thing the S&P 500 structurally cannot do: **vary total
+> exposure and concentrate into the strongest names.** That needs **portfolio state**, which this
+> CLAUDE.md previously deferred to the v2 track. Session 13 pulls the *exposure-management* half
+> of that v2 work forward, because it is the actual source of edge. Position-level exit management
+> for real holdings stays in v2.
+>
+> **The edge, stated plainly:** the index is always 100% invested in ~500 names. This agent can be
+> 100% invested in its 6 best names during RISK_ON and 30%/cash during RISK_OFF. That asymmetry —
+> dynamic exposure + concentration — is the realistic alpha. Entry precision is not.
+>
+> **Everything here is a SIMULATED / PAPER portfolio.** It produces target weights and rebalance
+> *suggestions* against a hypothetical balance. It never auto-executes. (Live order routing stays
+> permanently out of scope.)
+>
+> **This is unproven until Session 14 (backtest) validates it.** Aggressive concentration and a
+> regime dial look great in a bull stretch and can hurt in whipsaw/bear regimes. Do not trust this
+> with a real dollar before the walk-forward backtest. Build 13, then immediately build 14.
+
+---
+
+### Session 13 — Portfolio Exposure Management
+
+**Goal:** Turn the agent from a setup *scanner* into a *portfolio constructor* that can beat the
+index via the only durable levers available to a concentrated thematic book: **(1) dynamic total
+exposure** (the cash option the index lacks), **(2) conviction-weighted concentration** into the
+top-ranked names, and **(3) relative-strength rotation** that cuts laggards fast. All paper-only;
+all suggestions, never auto-executed.
+
+**The three mechanisms:**
+
+1. **Regime-as-a-dial (exposure.py).** Promote the Session 10 regime from an alert filter to a
+   portfolio-level exposure target:
+   - `RISK_ON` → `target_exposure_on` (default 100% invested)
+   - `NEUTRAL` → `target_exposure_neutral` (default 60%)
+   - `RISK_OFF` → `target_exposure_off` (default 30%; configurable to 0% for fully defensive)
+   - **Hysteresis (critical, prevents whipsaw):** require the regime label to persist for
+     `regime_confirm_days` (default 3 trading days) before changing the exposure target. A
+     one-day flip does NOT move the dial. This is the single most important guard — a laggy gate
+     that flip-flops will bleed the account on whipsaws and is how this kind of system most often
+     underperforms buy-and-hold.
+
+2. **Conviction sizing (sizing.py).** Within the target exposure, weight positions by composite
+   score (Session 11), not equal-weight:
+   - Take the top `max_positions` names (default 6) by composite score that have a gradeable,
+     non-disqualified setup.
+   - Weight ∝ composite score, normalized to the current exposure target.
+   - **Concentration cap:** no single name exceeds `max_position_pct` (default 25%) — prevents one
+     RDW-style moonshot-or-disaster from dominating the book.
+   - **Minimum weight floor:** drop names whose normalized weight falls below `min_position_pct`
+     (default 5%) — avoids dust positions that just add turnover.
+
+3. **Relative-strength rotation (sizing.py).** Decide what to hold vs. cut:
+   - **Enter:** a name breaking into the top `max_positions` by composite with a non-disqualified,
+     ≥`min_grade` setup.
+   - **Exit:** a held name that (a) falls below `exit_rank` (default: out of top 10), OR (b) loses
+     its 50 EMA, OR (c) trips a Session 10 disqualifier. Cut losers fast; let winners ride.
+   - **Hold band:** to limit churn, a held name in ranks `max_positions+1 .. exit_rank` is *held,
+     not added to* — it only exits when it breaches `exit_rank`. This hysteresis on names mirrors
+     the hysteresis on regime.
+
+**Turnover / cost discipline (woven through):**
+- **Rebalance cadence:** `rebalance_cadence` (default `"weekly"`, not daily) — recompute targets
+  on a schedule, not every signal. Daily rebalancing churns the account to death.
+- **No-trade band:** only generate a rebalance suggestion when a target weight differs from the
+  current weight by more than `rebalance_threshold_pct` (default 3%). Small drifts are ignored.
+- Rationale baked into the doc: live momentum returns historically ran ~half their paper level
+  after costs — turnover is a tax, so the design minimizes it.
+
+**Build:**
+- `src/core/portfolio.py` — `PaperPortfolio` (cash + positions {ticker, shares, entry, weight},
+  hypothetical NAV from latest closes); `current_weights()`, `apply_targets(targets)` (records a
+  rebalance event, paper-only), persisted in a `portfolio` + `portfolio_history` SQLite table.
+- `src/core/exposure.py` — `target_exposure(regime_history)` with the hysteresis rule → a single
+  0.0–1.0 invested fraction.
+- `src/core/sizing.py` — `target_weights(ranked_signals, exposure, held)` implementing conviction
+  sizing + concentration caps + RS rotation + hold-band + no-trade-band. Pure/deterministic.
+- `src/core/signals.py` — after ranking, compute the exposure target, build target weights, diff
+  against the paper portfolio, and emit **rebalance suggestions** ("trim NVDA 28%→25%, exit GEV,
+  add LITE 8%"). Stored + shown; never executed.
+- `src/agent/notify.py` — a daily/weekly **portfolio summary** alert: current exposure %, regime,
+  holdings with weights, and any rebalance suggestions.
+- Dashboard — a new **Portfolio** page: current paper NAV vs a $5,000 (configurable) start, the
+  exposure dial (🟢/🟡/🔴 + %), current holdings with weights and composite scores, rebalance
+  suggestions, and a NAV-vs-VOO line chart (VOO fetched through the existing `data.fetch_prices`
+  seam). This VOO overlay is the whole point — every view benchmarks against the index.
+- `config.py` — `paper_start_balance` (5000), `target_exposure_on/neutral/off` (1.0/0.6/0.3),
+  `regime_confirm_days` (3), `max_positions` (6), `max_position_pct` (0.25), `min_position_pct`
+  (0.05), `exit_rank` (10), `min_grade` ("DECENT"), `rebalance_cadence` ("weekly"),
+  `rebalance_threshold_pct` (0.03).
+- Tests: `test_exposure.py` (hysteresis: a 1-day flip does NOT move the dial; a 3-day persistent
+  flip does), `test_sizing.py` (conviction weights sum to exposure, concentration cap holds,
+  laggard below exit_rank is cut, hold-band name is kept, no-trade-band suppresses tiny rebalances),
+  `test_portfolio.py` (NAV math, apply_targets bookkeeping).
+
+**Verify before moving on:**
+- Exposure dial: synthetic RISK_OFF for 1 day → no change; persists 3 days → exposure drops to the
+  configured floor. No whipsaw on single-day flips.
+- Conviction sizing: top-6 by composite, weights ∝ score, none exceed 25%, sum to the exposure
+  target, dust positions dropped.
+- Rotation: a held name that loses its 50 EMA or falls past rank 10 produces an EXIT suggestion; a
+  name drifting within the hold band is kept.
+- No-trade band: a 1% target drift produces no suggestion; a 5% drift does.
+- Dashboard Portfolio page shows paper NAV, exposure dial, holdings, suggestions, and the VOO
+  overlay.
+- `pytest tests/ -v` and `mypy --strict` green.
+
+**Honest guardrails written into the session:**
+- This is a SINGLE-THEME book. Dynamic exposure + concentration can beat the index over a cycle,
+  but the dominant variable remains whether the AI theme outperforms. The agent times and
+  concentrates the theme; it does not diversify away from it.
+- The regime dial's value depends entirely on the gate being good. A whippy gate underperforms
+  buy-and-hold. The hysteresis is mandatory, and the gate's behavior must be inspected in the
+  Session 14 backtest across a real bear market before trusting it.
+- Concentration cuts both ways: it's why the book can beat the index and why its drawdowns can be
+  deeper. The `max_position_pct` cap is the protection; do not raise it without backtest evidence.
+- Paper-only. No live execution, ever, in this project.
+
+---
+
+### Session 14 — Walk-Forward Backtest vs VOO (the verdict)
+
+**Goal:** The only session that answers "does this beat the S&P 500?" Run the *entire* pipeline
+(strategies → scorecard → gating → composite → exposure → sizing → rotation) over 3–5 years of real
+daily bars, walk-forward, and measure the paper portfolio against VOO net of estimated costs —
+through at least one real drawdown.
+
+**Build:**
+- `src/core/backtest_portfolio.py` — replay the full system bar-by-bar over `backtest_years`
+  (default 5) of real history: at each rebalance date, reconstruct the agent's targets *using only
+  data available up to that date* (no lookahead), apply turnover costs (`cost_per_trade_bps`,
+  default 10 bps round-trip + slippage), and track paper NAV.
+- Metrics vs VOO over the same window: total return, CAGR, **max drawdown**, **Sharpe**, **Sortino**,
+  volatility, % of months beating VOO, longest underperformance streak, turnover, and cost drag.
+- Regime-conditional breakdown: performance in RISK_ON vs RISK_OFF months (does the dial actually
+  add value, or just reduce return?).
+- A NAV-vs-VOO equity curve + drawdown chart on a new dashboard **Backtest** tab.
+- `config.py` — `backtest_years` (5), `cost_per_trade_bps` (10), `slippage_bps` (5).
+- Tests: no-lookahead assertion (targets at date T use only data ≤ T), cost application, metric math.
+
+**Verify before moving on:**
+- Backtest completes over the full window with no lookahead.
+- Reports total return, CAGR, max drawdown, Sharpe/Sortino, % months > VOO — all vs VOO net of costs.
+- The equity curve spans at least one real correction; inspect how the exposure dial behaved there.
+- **The honest read:** if the system does not beat VOO on a risk-adjusted basis (Sharpe) net of
+  costs across the full window including a drawdown, that is the answer — do not deploy capital.
+  A smoother ride at a lower return is a legitimate outcome; a higher return with far deeper
+  drawdowns is not a win. Let the numbers decide, not the narrative.
+- `pytest tests/ -v` and `mypy --strict` green.
+
+---
+
 ### v2 / Future — Portfolio-aware decision support (deferred, not yet a buildable session)
 
-Everything above is **stateless about what you own**. The natural next leap needs a **holdings input** (a positions file/config: `ticker, entry, size, date`). Once the agent knows your portfolio it can answer the harder questions:
+> **Note:** Exposure dialing, conviction sizing, concentration caps, and RS rotation are **no longer
+> deferred** — they're **Session 13** (paper portfolio) + **Session 14** (walk-forward validation vs
+> VOO). What remains below is the half that requires knowing your **real** positions.
 
-- **Position management / exits** — the under-served half of trading: `HOLD / TRIM / TAKE-PROFIT / EXIT` per holding (e.g., close below the 50 EMA → EXIT; +X% → TRIM; trailing stop). Most systems only plan entries.
-- **Portfolio-aware sizing & concentration** — discount new signals in layers/themes you're already heavy in; cap value-chain concentration (e.g., "already 40% networking → halve the CRDO size").
-- **Opportunity cost vs holdings** — "is this a better dollar than what you already hold?", not just better than cash.
-- **Bayesian probability of success** — a calibrated win probability blended from setup type + **regime-conditional** historical win-rate + RS + earnings proximity, replacing/augmenting the star rating.
+Sessions 1–14 build and validate a **paper** portfolio constructor — but it's still stateless about
+what you *actually own*. The remaining leap needs a **holdings input** (a positions file/config:
+`ticker, entry, size, date`) plus a light **trade journal**. Once the agent knows your real book it
+can answer the questions a paper portfolio can't:
 
-These depend on a holdings store + a light trade journal (see open question #17) and some calibration data. **Scope when requested** — they change the agent from a watchlist scanner into a portfolio co-pilot.
+- **Position-level exit management for real holdings** — the under-served half of trading:
+  `HOLD / TRIM / TAKE-PROFIT / EXIT` per *actual* position (e.g., close below the 50 EMA → EXIT;
+  +X% → TRIM; trailing stop), plus **opportunity cost vs. what you own** ("is this a better dollar
+  than a name you already hold?"). Session 13 rotates a *paper* book; this manages the *real* one.
+- **Trade journal** — record "I bought this alert at $X" and track real outcomes (see open
+  question #17); the raw material for calibration.
+- **Bayesian probability of success** — a calibrated win probability blended from setup type +
+  **regime-conditional** historical win-rate + RS + earnings proximity, replacing/augmenting the
+  star rating.
+
+These depend on a holdings store + the trade journal and some calibration data. **Scope when
+requested** — they change the agent from a watchlist scanner into a portfolio co-pilot.
 
 ---
 
@@ -779,7 +951,7 @@ streamlit run src/dashboard/app.py               # dashboard at localhost:8501
 - Options flow / unusual options activity
 - News sentiment / NLP on earnings calls
 - Relative strength ranking system → **now Session 11** (cross-sectional percentile rank + opportunity ordering)
-- Automated position sizing / risk management (Session 9 adds *informational* sizing tiers, stop/target, and profit-take levels; Session 11 adds suggested allocation % — all suggestions, never auto-executed; actual order placement stays out; **portfolio-aware sizing/exits = v2 track**)
+- Automated position sizing / risk management (Session 9 adds *informational* sizing tiers, stop/target, and profit-take levels; Session 11 adds suggested allocation % — all suggestions, never auto-executed; actual order placement stays out; **paper-portfolio exposure / conviction sizing / RS rotation = Session 13 (validated in Session 14); real-holdings exits = v2 track**)
 - Sector rotation quantitative model → **now Session 11** (numeric layer strength + rotation Δ; was qualitative-only)
 
 These are good v2 candidates but would balloon scope.
@@ -811,6 +983,12 @@ Tagged by priority. **Resolve 🔴 before writing code.** Update this section as
 14. **Strategy weighting/priority.** Should the dashboard rank strategies equally, or weight some higher? (e.g., IPO base breakout on ANTH > EMA pullback on SIEGY)
 15. **Pattern library.** Start with the 6 candlestick patterns listed, or include more? `pandas-ta` supports ~60 patterns — too many creates noise. Which additional patterns (if any) are worth including?
 16. **Confidence threshold for alerts.** Should ⭐ signals still fire desktop notifications, or only ⭐⭐+? Lower threshold = more alerts but more noise.
+
+*(Session 13/14 questions — numbered 27–29 to avoid clashing with the 🟢 items 17–26 below.)*
+
+27. **Exposure floor in RISK_OFF.** Default 30% invested. Go fully to cash (0%) for maximum defense, or keep a floor to avoid missing sharp recoveries? Backtest both in Session 14.
+28. **Concentration vs. smoothness.** `max_positions` 6 and `max_position_pct` 25% is aggressive. More positions / lower caps = smoother, closer to the index. Tune against the Session 14 Sharpe.
+29. **Rebalance cadence.** Weekly default. Daily churns/costs more; monthly is calmer but slower to cut losers. Let the backtest's turnover/cost drag decide.
 
 ### 🟢 Nice-to-have (defer to v2 unless requested)
 
@@ -844,3 +1022,8 @@ These were chosen as defaults to make the spec concrete. Flag any you want chang
 - Consolidation range: 8%, minimum 10 trading days
 - ATH entry zone: 5–10% pullback
 - IPO base strategy dormant until an IPO ticker is manually added
+- Index-beating edge = dynamic exposure (regime dial) + conviction concentration + RS rotation, NOT entry precision. Drawdown avoidance is the primary alpha source. (Session 13)
+- Paper portfolio only; rebalance suggestions never auto-execute
+- Regime dial uses 3-day hysteresis to avoid whipsaw (mandatory guard)
+- Top 6 names, 25% max single position, weekly rebalance, 3% no-trade band, 30% RISK_OFF floor
+- No conclusion about beating VOO is valid until the Session 14 walk-forward backtest (net of costs, through a real drawdown). Build 13, then 14, before trusting a dollar
