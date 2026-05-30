@@ -72,6 +72,19 @@ class Settings(BaseSettings):
     # --- indicators ---
     volume_avg_window: int = 20
 
+    # --- Session 7: setup quality scorecard ---
+    min_risk_reward: float = 2.0
+    earnings_buffer_days: int = 5
+    rs_lookback: int = 20
+    rs_benchmarks: list[str] = Field(default_factory=lambda: ["SPY", "QQQ", "SMH"])
+    resistance_lookback: int = 60
+    swing_pivot_k: int = 3  # bars each side that define a swing high/low
+    low_headroom_pct: float = 3.0
+    fallback_stop_pct: float = 8.0  # used when no swing-low support is found
+    breadth_healthy_pct: float = 0.5  # >=50% of names bullish => healthy tape
+    leading_layers_top_n: int = 3
+    enable_scorecard: bool = True
+
     # --- alerts ---
     min_confidence_stars: int = 1
     alert_desktop: bool = True

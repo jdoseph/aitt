@@ -11,6 +11,7 @@ import pandas as pd
 from loguru import logger
 
 from src.agent import notify
+from src.core import benchmarks, earnings
 from src.core.data import fetch_many
 from src.core.signals import CycleResult, SignalEngine
 from src.core.storage import Storage
@@ -33,7 +34,14 @@ def evaluate_signals(
     if price_map is None:
         price_map = {t: store.get_prices(t) for t in load_watchlist().tickers}
         price_map = {t: df for t, df in price_map.items() if not df.empty}
-    return SignalEngine(store).run_cycle(price_map)
+    # Wire in the real (network) scorecard providers; the engine fetches benchmarks
+    # once and earnings per gradeable ticker (cached).
+    engine = SignalEngine(
+        store,
+        benchmark_provider=benchmarks.fetch_benchmarks,
+        earnings_provider=earnings.days_to_earnings,
+    )
+    return engine.run_cycle(price_map)
 
 
 def fire_alerts(result: CycleResult) -> int:

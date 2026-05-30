@@ -20,7 +20,17 @@ _SEVERITY_PREFIX = {"entry": "🟢 ENTRY", "secondary": "🟡 DIP", "warning": "
 
 def format_alert(alert: Alert) -> str:
     prefix = _SEVERITY_PREFIX.get(alert.severity, alert.severity.upper())
-    return f"[{prefix}] {alert.message}"
+    head = f"[{prefix}] {alert.message}"
+    if alert.action:
+        head += f"  →  {alert.action}"
+    return head
+
+
+def composite_block(alert: Alert) -> str:
+    """Headline plus the indented scorecard checks (when the alert was graded)."""
+    lines = [format_alert(alert)]
+    lines.extend(f"    {line}" for line in alert.scorecard_lines)
+    return "\n".join(lines)
 
 
 class Notifier(ABC):
@@ -34,11 +44,11 @@ class ConsoleNotifier(Notifier):
     """Logs alerts through loguru (always safe, no external deps)."""
 
     def send(self, alert: Alert) -> None:
-        line = format_alert(alert)
+        block = composite_block(alert)
         if alert.severity == "warning":
-            logger.warning(line)
+            logger.warning(block)
         else:
-            logger.info(line)
+            logger.info(block)
 
 
 class DesktopNotifier(Notifier):
@@ -53,9 +63,10 @@ class DesktopNotifier(Notifier):
 
             timeout = 25 if alert.confidence >= 3 else 12
             title = f"{'⭐' * alert.confidence or '•'} {alert.ticker} — {alert.strategy}"
+            body = alert.message if not alert.action else f"{alert.message}\n→ {alert.action}"
             notification.notify(
                 title=title[:64],
-                message=alert.message[:240],
+                message=body[:240],
                 app_name=self.APP_NAME,
                 timeout=timeout,
             )

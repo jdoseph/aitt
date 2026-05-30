@@ -12,6 +12,7 @@ ATH-freshness gate, volume requirement, and confidence threshold from config.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date as Date
 from typing import Any
@@ -19,13 +20,22 @@ from typing import Any
 import pandas as pd
 from loguru import logger
 
+from src.core import market, scorecard
 from src.core.config import settings
+from src.core.scorecard import ScoreContext
 from src.core.storage import Storage
 from src.core.strategies.ath_pullback import ATHPullbackStrategy
 from src.core.strategies.base import NO_SIGNAL, Signal, Strategy
 from src.core.strategies.consolidation_breakout import ConsolidationBreakoutStrategy
 from src.core.strategies.ema_pullback import EMAPullbackStrategy
 from src.core.strategies.ipo_base import IPOBaseStrategy
+from src.core.watchlist import Watchlist, load_watchlist
+
+# Statuses worth grading with the full scorecard (the alert-worthy entry states).
+GRADEABLE_STATUSES: frozenset[str] = frozenset(
+    {"AT_9_EMA", "AT_21_EMA", "ENTRY_ZONE", "DEEP_PULLBACK", "BREAKOUT", "IPO_BREAKOUT"}
+)
+_ACTION_RANK = {"HIGH-QUALITY": 3, "DECENT": 2, "MARGINAL": 1, "AVOID": 0}
 
 DEFAULT_STRATEGIES: tuple[type[Strategy], ...] = (
     EMAPullbackStrategy,
@@ -50,6 +60,8 @@ class Alert:
     confidence: int
     patterns: list[str]
     date: Date
+    action: str | None = None  # scorecard grade, if scored
+    scorecard_lines: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -59,6 +71,8 @@ class CycleResult:
     n_signals: int = 0
     status_counts: dict[str, int] = field(default_factory=dict)
     alerts: list[Alert] = field(default_factory=list)
+    breadth_summary: str = ""
+    leading_layers: list[str] = field(default_factory=list)
 
 
 def _stars(n: int) -> str:
@@ -138,65 +152,153 @@ def alert_decision(sig: Signal) -> tuple[str, str] | None:
     return None
 
 
-class SignalEngine:
-    """Runs all strategies over a price map and reconciles signals/alerts with the DB."""
+@dataclass
+class _Evaluated:
+    ticker: str
+    df: pd.DataFrame
+    strategy: Strategy
+    signal: Signal
+    bar_date: Date  # signal.date, already known non-None at collection time
 
-    def __init__(self, store: Storage, strategies: tuple[type[Strategy], ...] | None = None) -> None:
+
+class SignalEngine:
+    """Runs all strategies over a price map and reconciles signals/alerts with the DB.
+
+    Scorecard inputs (benchmarks, earnings) are injected as providers so the engine
+    stays offline/deterministic in tests; the agent wires in the real network
+    providers (see ``jobs.evaluate_signals``).
+    """
+
+    def __init__(
+        self,
+        store: Storage,
+        strategies: tuple[type[Strategy], ...] | None = None,
+        *,
+        watchlist: Watchlist | None = None,
+        benchmark_provider: Callable[[], dict[str, pd.DataFrame]] | None = None,
+        earnings_provider: Callable[[str], int | None] | None = None,
+        enable_scorecard: bool | None = None,
+    ) -> None:
         self.store = store
         self.strategies: list[Strategy] = [cls() for cls in (strategies or DEFAULT_STRATEGIES)]
+        self._watchlist = watchlist
+        self.benchmark_provider = benchmark_provider or (lambda: {})
+        self.earnings_provider = earnings_provider or (lambda _t: None)
+        self.enable_scorecard = (
+            settings.enable_scorecard if enable_scorecard is None else enable_scorecard
+        )
+
+    def _watchlist_or_load(self) -> Watchlist:
+        if self._watchlist is None:
+            self._watchlist = load_watchlist()
+        return self._watchlist
 
     def run_cycle(self, price_map: dict[str, pd.DataFrame]) -> CycleResult:
         result = CycleResult(n_tickers=len(price_map))
 
+        # --- pass 1: evaluate everything (in memory) ---
+        evaluated: list[_Evaluated] = []
         for ticker, df in price_map.items():
             for strat in self.strategies:
                 sig = self._safe_evaluate(strat, ticker, df)
                 if sig is None or sig.status == NO_SIGNAL or sig.date is None:
                     continue
+                evaluated.append(_Evaluated(ticker, df, strat, sig, sig.date))
 
-                prev = self.store.latest_signal(ticker, strat.name)
-                prev_status = prev.status if prev else None
+        # --- market context + scorecard inputs (computed once) ---
+        ctx_market = market.compute_context(
+            [e.signal for e in evaluated], self._watchlist_or_load()
+        )
+        layer_of = {e.ticker: e.layer for e in self._watchlist_or_load().entries}
+        benchmarks = self.benchmark_provider() if self.enable_scorecard else {}
+        earnings_cache: dict[str, int | None] = {}
 
-                self.store.record_signal(
+        # --- pass 2: score, persist, alert ---
+        for ev in evaluated:
+            sig, strat = ev.signal, ev.strategy
+            card = None
+            details = dict(sig.details)
+            if self.enable_scorecard and sig.status in GRADEABLE_STATUSES:
+                card = self._score(ev, ctx_market, benchmarks, layer_of, earnings_cache)
+                details["scorecard"] = card.to_summary()
+
+            prev = self.store.latest_signal(ev.ticker, strat.name)
+            prev_status = prev.status if prev else None
+
+            self.store.record_signal(
+                ticker=sig.ticker,
+                date=ev.bar_date,
+                strategy=strat.name,
+                status=sig.status,
+                details=details,
+                confidence=sig.confidence,
+                patterns=sig.patterns_detected,
+            )
+            result.n_signals += 1
+            result.bar_date = ev.bar_date
+            result.status_counts[sig.status] = result.status_counts.get(sig.status, 0) + 1
+
+            decision = alert_decision(sig)
+            if decision and prev_status != sig.status:
+                severity, message = decision
+                self.store.record_alert(
                     ticker=sig.ticker,
-                    date=sig.date,
+                    date=ev.bar_date,
                     strategy=strat.name,
                     status=sig.status,
-                    details=sig.details,
+                    message=message,
                     confidence=sig.confidence,
                     patterns=sig.patterns_detected,
                 )
-                result.n_signals += 1
-                result.bar_date = sig.date
-                result.status_counts[sig.status] = result.status_counts.get(sig.status, 0) + 1
-
-                decision = alert_decision(sig)
-                if decision and prev_status != sig.status:
-                    severity, message = decision
-                    self.store.record_alert(
+                result.alerts.append(
+                    Alert(
                         ticker=sig.ticker,
-                        date=sig.date,
                         strategy=strat.name,
                         status=sig.status,
+                        severity=severity,
                         message=message,
                         confidence=sig.confidence,
-                        patterns=sig.patterns_detected,
+                        patterns=list(sig.patterns_detected),
+                        date=ev.bar_date,
+                        action=card.action if card else None,
+                        scorecard_lines=card.render_lines() if card else [],
                     )
-                    result.alerts.append(
-                        Alert(
-                            ticker=sig.ticker,
-                            strategy=strat.name,
-                            status=sig.status,
-                            severity=severity,
-                            message=message,
-                            confidence=sig.confidence,
-                            patterns=list(sig.patterns_detected),
-                            date=sig.date,
-                        )
-                    )
+                )
 
-        result.alerts.sort(key=lambda a: (-a.confidence, _SEVERITY_RANK.get(a.severity, 9)))
+        result.breadth_summary = ctx_market.breadth.summary()
+        result.leading_layers = [k for k, _ in ctx_market.leadership[: settings.leading_layers_top_n]]
+        # Confidence stays primary; the scorecard grade is the tie-breaker.
+        result.alerts.sort(
+            key=lambda a: (
+                -a.confidence,
+                -_ACTION_RANK.get(a.action or "", -1),
+                _SEVERITY_RANK.get(a.severity, 9),
+            )
+        )
         return result
+
+    def _score(
+        self,
+        ev: _Evaluated,
+        ctx_market: market.MarketContext,
+        benchmarks: dict[str, pd.DataFrame],
+        layer_of: dict[str, str],
+        earnings_cache: dict[str, int | None],
+    ) -> scorecard.Scorecard:
+        if ev.ticker not in earnings_cache:
+            try:
+                earnings_cache[ev.ticker] = self.earnings_provider(ev.ticker)
+            except Exception as exc:  # noqa: BLE001 - earnings is best-effort
+                logger.debug("earnings provider failed for {}: {}", ev.ticker, exc)
+                earnings_cache[ev.ticker] = None
+        ctx = ScoreContext(
+            benchmarks=benchmarks,
+            earnings_days=earnings_cache[ev.ticker],
+            breadth=ctx_market.breadth,
+            leading_layers=ctx_market.leading_layers,
+            ticker_layer=layer_of.get(ev.ticker),
+        )
+        return scorecard.build_scorecard(ev.signal, ev.df, ctx)
 
     @staticmethod
     def _safe_evaluate(strat: Strategy, ticker: str, df: pd.DataFrame) -> Signal | None:

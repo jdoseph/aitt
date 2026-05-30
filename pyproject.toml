@@ -8,6 +8,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     # --- market data ---
     "yfinance>=0.2.40",
+    "lxml>=5.0",  # yfinance needs it to parse the earnings calendar
     # --- numerics / TA ---
     # pandas-ta 0.4.71b0 is the maintained rewrite: no more `numpy.NaN`, needs numpy>=2.2.6.
     "numpy>=2.2.6",

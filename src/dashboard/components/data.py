@@ -6,15 +6,30 @@ derived tables are cached data with a short TTL and a manual refresh hook.
 
 from __future__ import annotations
 
+import json
 from datetime import date as Date
 
 import pandas as pd
 import streamlit as st
 
+from src.core import market
 from src.core.indicators import compute_metrics
-from src.core.storage import AlertRecord, SignalRecord, Storage
+from src.core.market import MarketContext
+from src.core.storage import SignalRecord, Storage
 from src.core.watchlist import Watchlist, load_watchlist
 from src.dashboard.components import theme
+
+_ACTION_RANK = {"HIGH-QUALITY": 3, "DECENT": 2, "MARGINAL": 1, "AVOID": 0}
+
+
+def _best_action(sigs: dict[str, SignalRecord]) -> str:
+    """Highest-graded scorecard action across a ticker's latest signals ('' if none)."""
+    actions = []
+    for rec in sigs.values():
+        card = json.loads(rec.details or "{}").get("scorecard")
+        if card and card.get("action"):
+            actions.append(card["action"])
+    return max(actions, key=lambda a: _ACTION_RANK.get(a, -1), default="")
 
 
 @st.cache_resource
@@ -86,10 +101,26 @@ def overview_table() -> pd.DataFrame:
                 "IPO": theme.status_label(stat("ipo_base")) if "ipo_base" in sigs else "",
                 "conf": max_conf,
                 "stars": theme.stars(max_conf),
+                "action": _best_action(sigs),
             }
         )
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["quality_rank"] = df["action"].map(lambda a: _ACTION_RANK.get(a, -1))
+    return df
+
+
+@st.cache_data(ttl=300)
+def market_context() -> MarketContext | None:
+    """Breadth + layer leadership computed from the latest stored signals."""
+    store, wl = get_store(), get_watchlist()
+    records: list[SignalRecord] = []
+    for t in wl.tickers:
+        records.extend(_latest_signals(store, t).values())
+    if not records:
+        return None
+    return market.compute_context(records, wl)
 
 
 @st.cache_data(ttl=300)

@@ -5,9 +5,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from src.dashboard.components import data, theme
+from src.dashboard.components import data, scorecard, theme
 
 _SORTS = {
+    "Setup quality": ("quality_rank", False),
     "Confidence (⭐ first)": ("conf", False),
     "Closest to 21 EMA": ("abs_dist_21", True),
     "Closest to ATH entry": ("ath_entry_gap", True),
@@ -22,6 +23,11 @@ def render() -> None:
     if df.empty:
         st.warning("No data yet. Run `python -m src.agent --once` to populate the database.")
         return
+
+    ctx = data.market_context()
+    if ctx is not None:
+        scorecard.render_market_header(ctx, data.get_watchlist())
+        st.divider()
 
     # Derived sort helpers.
     df["abs_dist_21"] = df["dist_21_%"].abs()
@@ -59,7 +65,7 @@ def render() -> None:
     st.caption(f"{len(view)} of {len(df)} tickers")
     display_cols = [
         "ticker", "name", "layer_title", "price", "chg_%",
-        "dist_9_%", "dist_21_%", "pullback_%", "EMA", "ATH", "FLAG", "IPO", "stars",
+        "dist_9_%", "dist_21_%", "pullback_%", "EMA", "ATH", "FLAG", "IPO", "stars", "action",
     ]
     st.dataframe(
         view[display_cols],

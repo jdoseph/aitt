@@ -6,7 +6,7 @@ import json
 
 import streamlit as st
 
-from src.dashboard.components import charts, data, legend, theme
+from src.dashboard.components import charts, data, legend, scorecard, theme
 
 
 def render() -> None:
@@ -44,6 +44,17 @@ def render() -> None:
             col.metric(label, theme.status_label(rec.status), theme.stars(rec.confidence) or None)
         else:
             col.metric(label, "—")
+
+    # Setup quality scorecard (best-graded strategy for this ticker, if any).
+    cards = [
+        c
+        for rec in sigs.values()
+        if (c := json.loads(rec.details or "{}").get("scorecard"))
+    ]
+    if cards:
+        best = max(cards, key=lambda s: scorecard.ACTION_RANK.get(s.get("action", ""), -1))
+        with st.container(border=True):
+            scorecard.render_scorecard(best)
 
     legend.render_chart_legend()
 
