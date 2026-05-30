@@ -33,12 +33,19 @@ Copy-Item .env.example .env      # optional — edit thresholds/paths
 # One-shot evaluation cycle (testing / manual run)  [available from Session 4]
 python -m src.agent --once
 
+# Check the watchlist loads and every ticker is fetchable  [Session 6]
+python -m src.agent --validate
+
 # Background agent (daily-close scheduler)            [available from Session 4]
 python -m src.agent
 
 # Dashboard at http://localhost:8501                  [available from Session 5]
 streamlit run src/dashboard/app.py
 ```
+
+With [`just`](https://github.com/casey/just) installed, the `justfile` wraps these
+against the project venv: `just test`, `just types`, `just validate`,
+`just fetch-once`, `just run-agent`, `just run-dashboard`.
 
 ## Project layout
 
@@ -75,11 +82,11 @@ uv run mypy src           # strict type check
 - [x] **Session 3** — consolidation breakout + IPO base
 - [x] **Session 4** — signal orchestrator + background agent (daily-close scheduler, notifications, `--once` CLI)
 - [x] **Session 5** — Streamlit dashboard (overview, chart, value chain, alerts)
-- [ ] Session 6 — testing, edge cases, polish
+- [x] **Session 6** — hardening: rotating file log, `--validate` watchlist check, resilience + pipeline tests, `justfile`
 - [x] **Session 7** — setup quality scorecard (trend / volume / earnings / rel-strength / R:R / resistance / leading layer / breadth) + composite grade
 - [x] **Session 8** — evidence layer: historical win-rate replay + catalysts (earnings beat/miss + headlines)
 - [x] **Session 9** — trade due diligence dossier: bull vs bear case ("why NOT buy?") + trade plan (stop/invalidation/targets/sizing) + EMA-200 alignment + informational market regime
 - [x] **Session 10** — market-regime gate (indices vs 50 EMA → RISK_ON/NEUTRAL/RISK_OFF) + automatic disqualifiers (suppress/downgrade bad alerts at the source)
-- [ ] Session 11 — 0-100 composite score + cross-sectional ranking + allocation + layer rotation + AI-thesis tracker
-- [ ] Session 12 — deeper signals: accumulation (OBV/A-D), weekly trend alignment, Weinstein stage, ATR crowding, AI-capex exposure
+- [x] **Session 11** — 0-100 composite score + cross-sectional ranking + allocation + layer rotation + AI-thesis tracker
+- [x] **Session 12** — deeper signals: accumulation (OBV/A-D), weekly trend alignment, Weinstein stage, ATR crowding, AI-capex exposure
 - [ ] v2 (deferred) — portfolio-aware: holdings input → exits, concentration, opportunity-cost-vs-holdings, Bayesian probability

@@ -7,13 +7,16 @@ skipped, never aborting the cycle.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
 import pandas as pd
 from loguru import logger
 
 from src.agent import notify
 from src.core import backtest, benchmarks, earnings, news
 from src.core.config import settings
-from src.core.data import fetch_many
+from src.core.data import DataFetchError, fetch_many, fetch_prices
 from src.core.signals import CycleResult, SignalEngine
 from src.core.storage import Storage
 from src.core.watchlist import load_watchlist
@@ -57,6 +60,51 @@ def evaluate_signals(
 def fire_alerts(result: CycleResult) -> int:
     """Dispatch the cycle's alerts to all enabled notification channels."""
     return notify.dispatch(result.alerts)
+
+
+@dataclass
+class ValidationReport:
+    """Result of a startup watchlist/config check (see :func:`validate_watchlist`)."""
+
+    ok: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)  # ticker -> reason
+
+    @property
+    def all_ok(self) -> bool:
+        return not self.failed
+
+    def summary(self) -> str:
+        n = len(self.ok) + len(self.failed)
+        line = f"watchlist: {len(self.ok)}/{n} tickers fetchable"
+        if self.failed:
+            detail = ", ".join(f"{t} ({why})" for t, why in self.failed.items())
+            return f"{line} — UNFETCHABLE: {detail}"
+        return line + " — all OK"
+
+
+def validate_watchlist(
+    fetcher: Callable[[str, int], pd.DataFrame] | None = None,
+) -> ValidationReport:
+    """Load the watchlist (validating its schema) and check every ticker fetches.
+
+    Loading raises on a malformed YAML/schema; reachability problems are collected
+    per ticker rather than raised, so one bad symbol doesn't mask the rest.
+    A small bar count keeps the check fast — we only need to confirm data exists.
+    """
+    fetch = fetcher or (lambda t, bars: fetch_prices(t, bars))
+    report = ValidationReport()
+    for ticker in load_watchlist().tickers:
+        try:
+            df = fetch(ticker, 5)
+            if df.empty:
+                report.failed[ticker] = "no data"
+            else:
+                report.ok.append(ticker)
+        except DataFetchError as exc:
+            report.failed[ticker] = str(exc)
+        except Exception as exc:  # noqa: BLE001 - report, don't abort, on any provider error
+            report.failed[ticker] = f"{type(exc).__name__}: {exc}"
+    return report
 
 
 def run_once(store: Storage | None = None, *, fetch: bool = True) -> CycleResult:

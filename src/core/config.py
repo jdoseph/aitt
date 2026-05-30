@@ -174,11 +174,21 @@ class Settings(BaseSettings):
 
     # --- logging ---
     log_level: str = "INFO"
+    # Rotating file sink for unattended (overnight/daily) runs. Set log_file to
+    # an empty string to disable file logging and log to stderr only.
+    log_file: Path = Field(default=Path("data/logs/agent.log"))
+    log_rotation: str = "10 MB"  # loguru rotation trigger (size or time)
+    log_retention: str = "14 days"  # how long rotated logs are kept
 
-    @field_validator("data_dir", "db_path", "watchlist_path", mode="after")
+    @field_validator("data_dir", "db_path", "watchlist_path", "log_file", mode="after")
     @classmethod
     def _anchor_to_project_root(cls, value: Path) -> Path:
-        """Resolve relative paths against the project root so the cwd doesn't matter."""
+        """Resolve relative paths against the project root so the cwd doesn't matter.
+
+        An empty path is left as-is (a sentinel meaning "no file logging").
+        """
+        if str(value) in ("", "."):
+            return value
         return value if value.is_absolute() else (PROJECT_ROOT / value)
 
     @property
@@ -189,10 +199,17 @@ class Settings(BaseSettings):
     def eod_eval_minute(self) -> int:
         return int(self.eod_eval_hhmm.split(":")[1])
 
+    @property
+    def file_logging_enabled(self) -> bool:
+        """True when a real log-file path is configured (empty path disables it)."""
+        return str(self.log_file) not in ("", ".")
+
     def ensure_dirs(self) -> None:
-        """Create the data directory if missing (idempotent)."""
+        """Create the data + log directories if missing (idempotent)."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.file_logging_enabled:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)
