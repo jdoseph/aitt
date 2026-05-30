@@ -51,6 +51,7 @@ class Check:
     status: str  # pass | warn | fail | na
     value: str = ""
     detail: str = ""
+    num: float | None = None  # raw numeric (days, vol_ratio, R:R, ...) for gating/scoring
 
 
 @dataclass
@@ -103,10 +104,10 @@ def _check_volume(m: Any) -> Check:
     vr = m.vol_ratio
     value = f"{vr:.1f}x avg"
     if vr >= settings.breakout_volume_mult:
-        return Check("volume", PASS, value)
+        return Check("volume", PASS, value, num=vr)
     if vr >= 1.0:
-        return Check("volume", WARN, value)
-    return Check("volume", FAIL, value)
+        return Check("volume", WARN, value, num=vr)
+    return Check("volume", FAIL, value, num=vr)
 
 
 def _check_earnings(days: int | None) -> Check:
@@ -114,8 +115,8 @@ def _check_earnings(days: int | None) -> Check:
         return Check("earnings", NA, "unknown")
     value = f"{days}d away"
     if days < settings.earnings_buffer_days:
-        return Check("earnings", WARN, value, "inside earnings buffer")
-    return Check("earnings", PASS, value)
+        return Check("earnings", WARN, value, "inside earnings buffer", num=float(days))
+    return Check("earnings", PASS, value, num=float(days))
 
 
 def _check_rel_strength(df: pd.DataFrame, benches: dict[str, pd.DataFrame]) -> Check:
@@ -126,8 +127,8 @@ def _check_rel_strength(df: pd.DataFrame, benches: dict[str, pd.DataFrame]) -> C
     avg_delta = sum(r.delta for r in rs) / len(rs)
     value = f"{avg_delta:+.1f}% vs mkt ({beats}/{len(rs)})"
     if beats >= math.ceil(len(rs) / 2):
-        return Check("rel_strength", PASS, value)
-    return Check("rel_strength", FAIL, value)
+        return Check("rel_strength", PASS, value, num=avg_delta)
+    return Check("rel_strength", FAIL, value, num=avg_delta)
 
 
 def _resistance_target(df: pd.DataFrame, m: Any) -> float | None:
@@ -154,10 +155,10 @@ def _check_risk_reward(df: pd.DataFrame, m: Any, target: float | None) -> Check:
         return Check("risk_reward", NA, "n/a")
     value = f"{rr:.1f} : 1"
     if rr >= settings.min_risk_reward:
-        return Check("risk_reward", PASS, value, f"stop ~{stop:.2f}")
+        return Check("risk_reward", PASS, value, f"stop ~{stop:.2f}", num=rr)
     if rr >= 1.0:
-        return Check("risk_reward", WARN, value, f"stop ~{stop:.2f}")
-    return Check("risk_reward", FAIL, value, f"stop ~{stop:.2f}")
+        return Check("risk_reward", WARN, value, f"stop ~{stop:.2f}", num=rr)
+    return Check("risk_reward", FAIL, value, f"stop ~{stop:.2f}", num=rr)
 
 
 def _check_layer(layer: str | None, leading: frozenset[str]) -> Check:
@@ -183,10 +184,10 @@ def _check_historical(hist: HistoricalStat | None) -> Check:
         return Check("historical", NA, f"n/a (n={ps.n if ps else 0})")
     value = f"{ps.win_rate:.0f}% win ({ps.horizon}d, n={ps.n})"
     if ps.win_rate >= settings.backtest_win_pass_pct:
-        return Check("historical", PASS, value)
+        return Check("historical", PASS, value, num=ps.win_rate)
     if ps.win_rate >= settings.backtest_win_warn_pct:
-        return Check("historical", WARN, value)
-    return Check("historical", FAIL, value)
+        return Check("historical", WARN, value, num=ps.win_rate)
+    return Check("historical", FAIL, value, num=ps.win_rate)
 
 
 def _check_catalyst(earnings_beat: str | None) -> Check:

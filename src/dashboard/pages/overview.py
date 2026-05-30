@@ -24,6 +24,14 @@ def render() -> None:
         st.warning("No data yet. Run `python -m src.agent --once` to populate the database.")
         return
 
+    regime = data.latest_regime()
+    if regime is not None:
+        badge = {"RISK_ON": "🟢 RISK_ON", "NEUTRAL": "🟡 NEUTRAL", "RISK_OFF": "🔴 RISK_OFF"}.get(
+            regime.label, regime.label
+        )
+        st.markdown(f"### Market regime: {badge}")
+        st.caption(regime.summary)
+
     ctx = data.market_context()
     if ctx is not None:
         scorecard.render_market_header(ctx, data.get_watchlist())
@@ -66,7 +74,7 @@ def render() -> None:
     display_cols = [
         "ticker", "name", "layer_title", "price", "chg_%",
         "dist_9_%", "dist_21_%", "pullback_%", "EMA", "ATH", "FLAG", "IPO", "stars", "action",
-        "strongest_bear",
+        "disqualified", "strongest_bear",
     ]
     st.dataframe(
         view[display_cols],
@@ -80,6 +88,7 @@ def render() -> None:
             "dist_21_%": st.column_config.NumberColumn("Δ21 %", format="%.2f"),
             "pullback_%": st.column_config.NumberColumn("Δ ATH %", format="%.2f"),
             "price": st.column_config.NumberColumn("price", format="%.2f"),
+            "disqualified": st.column_config.TextColumn("🚫 disqualified"),
             "strongest_bear": st.column_config.TextColumn("⛔ top bear factor"),
         },
     )

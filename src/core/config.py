@@ -112,6 +112,22 @@ class Settings(BaseSettings):
     # Top N bear factors surfaced next to the grade in alerts.
     dossier_bear_in_alert: int = 2
 
+    # --- Session 10: market-regime gate + automatic disqualifiers ---
+    enable_regime_gate: bool = True
+    # Canonical RISK_ON/OFF gate uses the 50-EMA (distinct from the Session 9
+    # informational `regime_ema_span` of 21).
+    regime_gate_ema_span: int = 50
+    regime_risk_off_fails: int = 2  # >= this many of SPY/QQQ/SMH below 50 EMA => RISK_OFF
+    # "suppress" => no notification; "downgrade" => alert fires but grade is capped.
+    disqualifier_mode: str = "suppress"
+    downgrade_cap_action: str = "MARGINAL"  # grade ceiling in downgrade mode
+    dq_below_50ema: bool = True
+    dq_earnings_days: int = 3  # suppress if earnings strictly within this many days
+    dq_rs_below_market: bool = True
+    dq_declining_volume: bool = True
+    dq_min_rr: float = 0.0  # >0 enables: suppress if R:R below this
+    risk_off_min_stars: int = 2  # entry alerts need >= this confidence in RISK_OFF
+
     # --- alerts ---
     min_confidence_stars: int = 1
     alert_desktop: bool = True

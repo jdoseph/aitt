@@ -15,7 +15,7 @@ import streamlit as st
 from src.core import market
 from src.core.indicators import compute_metrics
 from src.core.market import MarketContext
-from src.core.storage import DossierRecord, SignalRecord, Storage
+from src.core.storage import DossierRecord, RegimeRecord, SignalRecord, Storage
 from src.core.watchlist import Watchlist, load_watchlist
 from src.dashboard.components import theme
 
@@ -78,12 +78,18 @@ def overview_table() -> pd.DataFrame:
         dossier = store.latest_dossier(entry.ticker)
         bear = dossier.strongest_bear if dossier else ""
 
+        # Disqualified marker: any latest signal suppressed by the regime gate.
+        dq_reasons: list[str] = []
+        for rec in sigs.values():
+            d = json.loads(rec.details or "{}")
+            if d.get("suppressed"):
+                dq_reasons = d.get("disqualifiers", []) or dq_reasons
+                break
+
         max_conf = max((s.confidence for s in sigs.values()), default=0)
         cons = sigs.get("consolidation_breakout")
         cons_txt = ""
         if cons and cons.status in ("CONSOLIDATING", "BREAKOUT", "BREAKDOWN"):
-            import json
-
             d = json.loads(cons.details or "{}")
             cons_txt = f"{d.get('days_in_range', '?')}d / {d.get('range_width_pct', '?')}%"
 
@@ -106,6 +112,7 @@ def overview_table() -> pd.DataFrame:
                 "stars": theme.stars(max_conf),
                 "action": _best_action(sigs),
                 "strongest_bear": bear,
+                "disqualified": ("🚫 " + "; ".join(dq_reasons)) if dq_reasons else "",
             }
         )
 
@@ -138,6 +145,10 @@ def latest_signals(ticker: str) -> dict[str, SignalRecord]:
 
 def latest_dossier(ticker: str) -> DossierRecord | None:
     return get_store().latest_dossier(ticker)
+
+
+def latest_regime() -> RegimeRecord | None:
+    return get_store().latest_regime()
 
 
 @st.cache_data(ttl=300)

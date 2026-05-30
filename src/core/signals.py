@@ -21,10 +21,11 @@ from typing import Any
 import pandas as pd
 from loguru import logger
 
-from src.core import market, scorecard
+from src.core import gating, market, regime as regime_mod, scorecard
 from src.core.backtest import HistoricalStat
 from src.core.config import settings
 from src.core.dossier import Dossier, DossierContext, build_dossier
+from src.core.regime import Regime
 from src.core.scorecard import ScoreContext
 from src.core.storage import Storage
 from src.core.strategies.ath_pullback import ATHPullbackStrategy
@@ -72,9 +73,11 @@ class Alert:
     confidence: int
     patterns: list[str]
     date: Date
-    action: str | None = None  # scorecard grade, if scored
+    action: str | None = None  # scorecard grade, if scored (capped in downgrade mode)
     scorecard_lines: list[str] = field(default_factory=list)
     bear_reasons: list[str] = field(default_factory=list)  # top "why NOT buy" factors
+    regime: str = ""  # market-regime label at fire time
+    gate_flags: list[str] = field(default_factory=list)  # disqualifiers (downgrade mode)
 
 
 @dataclass
@@ -87,6 +90,9 @@ class CycleResult:
     breadth_summary: str = ""
     leading_layers: list[str] = field(default_factory=list)
     dossiers: dict[str, Dossier] = field(default_factory=dict)  # ticker -> dossier
+    regime_label: str = regime_mod.NEUTRAL
+    regime_summary: str = ""
+    n_suppressed: int = 0  # alerts suppressed by the regime gate / disqualifiers
 
 
 def _stars(n: int) -> str:
@@ -183,6 +189,19 @@ class _PendingAlert:
     severity: str
     message: str
     card: scorecard.Scorecard | None
+    action: str | None = None  # possibly capped by the gate (downgrade mode)
+    gate_flags: list[str] = field(default_factory=list)
+
+
+# Action grades, worst -> best, for capping in downgrade mode.
+_ACTION_ORDER = ["AVOID", "MARGINAL", "DECENT", "HIGH-QUALITY"]
+
+
+def _cap_action(action: str | None, ceiling: str) -> str | None:
+    """Lower ``action`` to ``ceiling`` if it currently grades higher."""
+    if action is None or action not in _ACTION_ORDER or ceiling not in _ACTION_ORDER:
+        return action
+    return action if _ACTION_ORDER.index(action) <= _ACTION_ORDER.index(ceiling) else ceiling
 
 
 class SignalEngine:
@@ -242,6 +261,10 @@ class SignalEngine:
         )
         layer_of = {e.ticker: e.layer for e in self._watchlist_or_load().entries}
         benchmarks = self.benchmark_provider() if self.enable_scorecard else {}
+        # Canonical market-regime gate (Session 10): one read per cycle.
+        regime = regime_mod.market_regime(benchmarks)
+        result.regime_label = regime.label
+        result.regime_summary = regime.summary()
         earnings_cache: dict[str, int | None] = {}
         beat_cache: dict[str, str | None] = {}
         news_cache: dict[str, list[dict[str, Any]]] = {}
@@ -271,6 +294,16 @@ class SignalEngine:
                 if catalysts["beat"] or catalysts["headlines"]:
                     details["catalysts"] = catalysts
 
+            # --- regime gate / automatic disqualifiers ---
+            decision = alert_decision(sig)
+            dq, suppressed = self._gate(sig, card, regime, decision)
+            action = _cap_action(card.action, settings.downgrade_cap_action) if (
+                card and dq and settings.disqualifier_mode == "downgrade"
+            ) else (card.action if card else None)
+            if dq:
+                details["disqualifiers"] = dq
+                details["suppressed"] = suppressed
+
             prev = self.store.latest_signal(ev.ticker, strat.name)
             prev_status = prev.status if prev else None
 
@@ -287,9 +320,11 @@ class SignalEngine:
             result.bar_date = ev.bar_date
             result.status_counts[sig.status] = result.status_counts.get(sig.status, 0) + 1
 
-            decision = alert_decision(sig)
             if decision and prev_status != sig.status:
                 severity, message = decision
+                if suppressed:
+                    result.n_suppressed += 1
+                    continue  # recorded as a signal, but fires no notification
                 self.store.record_alert(
                     ticker=sig.ticker,
                     date=ev.bar_date,
@@ -299,7 +334,12 @@ class SignalEngine:
                     confidence=sig.confidence,
                     patterns=sig.patterns_detected,
                 )
-                pending.append(_PendingAlert(ev=ev, severity=severity, message=message, card=card))
+                pending.append(
+                    _PendingAlert(
+                        ev=ev, severity=severity, message=message, card=card,
+                        action=action, gate_flags=dq,
+                    )
+                )
 
         # --- dossiers: one per graded ticker (bull/bear case + trade plan) ---
         dossiers = self._build_dossiers(
@@ -321,10 +361,21 @@ class SignalEngine:
                     confidence=p.ev.signal.confidence,
                     patterns=list(p.ev.signal.patterns_detected),
                     date=p.ev.bar_date,
-                    action=card.action if card else None,
+                    action=p.action,
                     scorecard_lines=card.render_lines() if card else [],
                     bear_reasons=dossier.top_bear() if dossier else [],
+                    regime=regime.label,
+                    gate_flags=p.gate_flags,
                 )
+            )
+
+        # Persist the regime label so the dashboard can show it without re-fetching.
+        if result.bar_date is not None:
+            self.store.upsert_regime(
+                date=result.bar_date,
+                label=regime.label,
+                flags=regime.flags,
+                summary=regime.summary(),
             )
 
         result.breadth_summary = ctx_market.breadth.summary()
@@ -367,6 +418,28 @@ class SignalEngine:
                 summary=dossier.to_summary(),
             )
         return out
+
+    def _gate(
+        self,
+        sig: Signal,
+        card: scorecard.Scorecard | None,
+        regime: Regime,
+        decision: tuple[str, str] | None,
+    ) -> tuple[list[str], bool]:
+        """Run a would-be alert through the regime gate / disqualifiers.
+
+        Returns ``(tripped_rules, suppressed)``. Only buy-style alerts with a
+        scorecard are gated; warnings/breakdowns pass through untouched.
+        """
+        if not (settings.enable_regime_gate and decision and card is not None):
+            return [], False
+        severity = decision[0]
+        dq = gating.disqualifiers(sig, card, regime)
+        # In RISK_OFF, raise the bar for fresh buys (and discount aggressive ones).
+        if regime.is_risk_off and severity == "entry" and sig.confidence < settings.risk_off_min_stars:
+            dq = [*dq, f"RISK_OFF: confidence below the {settings.risk_off_min_stars}-star bar"]
+        suppressed = bool(dq) and settings.disqualifier_mode == "suppress"
+        return dq, suppressed
 
     def _score(
         self,

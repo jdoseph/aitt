@@ -94,6 +94,18 @@ class DossierRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class RegimeRecord(SQLModel, table=True):
+    """The market-regime label for a given cycle/day (Session 10)."""
+
+    __tablename__ = "regime"
+
+    date: Date = Field(primary_key=True)
+    label: str = ""  # RISK_ON | NEUTRAL | RISK_OFF
+    flags: str = ""  # JSON {symbol: above_50ema}
+    summary: str = ""
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class AlertRecord(SQLModel, table=True):
     """A fired alert (a noteworthy signal transition)."""
 
@@ -339,6 +351,26 @@ class Storage:
                 .where(DossierRecord.ticker == ticker.upper())
                 .order_by(col(DossierRecord.date).desc())
             ).first()
+
+    # --- regime ----------------------------------------------------------- #
+    def upsert_regime(
+        self, *, date: Date, label: str, flags: dict[str, bool], summary: str
+    ) -> RegimeRecord:
+        """Upsert the market-regime label for a day (keyed by date)."""
+        with self.session() as s:
+            rec = s.get(RegimeRecord, date) or RegimeRecord(date=date)
+            rec.label = label
+            rec.flags = json.dumps(flags)
+            rec.summary = summary
+            rec.created_at = _utcnow()
+            s.merge(rec)
+            s.commit()
+            return rec
+
+    def latest_regime(self) -> RegimeRecord | None:
+        """Most recent stored market-regime label (None if never computed)."""
+        with self.session() as s:
+            return s.exec(select(RegimeRecord).order_by(col(RegimeRecord.date).desc())).first()
 
     # --- backtest stats --------------------------------------------------- #
     def get_backtest_stats(self, ticker: str, strategy: str, status: str) -> list[BacktestStat]:

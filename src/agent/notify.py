@@ -26,10 +26,18 @@ def format_alert(alert: Alert) -> str:
     return head
 
 
+_REGIME_BADGE = {"RISK_ON": "🟢 RISK_ON", "NEUTRAL": "🟡 NEUTRAL", "RISK_OFF": "🔴 RISK_OFF"}
+
+
 def composite_block(alert: Alert) -> str:
     """Headline, the scorecard checks, and the top 'why NOT buy' factors."""
     lines = [format_alert(alert)]
+    # Surface the tape when it isn't clean risk-on.
+    if alert.regime and alert.regime != "RISK_ON":
+        lines.append(f"    Regime: {_REGIME_BADGE.get(alert.regime, alert.regime)}")
     lines.extend(f"    {line}" for line in alert.scorecard_lines)
+    if alert.gate_flags:
+        lines.append(f"    ⚠ Flagged (downgraded): {' · '.join(alert.gate_flags)}")
     if alert.bear_reasons:
         lines.append(f"    Why NOT: {' · '.join(alert.bear_reasons)}")
     return "\n".join(lines)

@@ -70,11 +70,14 @@ def run_once(store: Storage | None = None, *, fetch: bool = True) -> CycleResult
 
     fire_alerts(result)
     logger.info(
-        "cycle done: {} tickers, {} signals, {} alerts (date={}) | statuses={}",
+        "cycle done: {} tickers, {} signals, {} alerts ({} suppressed) "
+        "(date={}, regime={}) | statuses={}",
         result.n_tickers,
         result.n_signals,
         len(result.alerts),
+        result.n_suppressed,
         result.bar_date,
+        result.regime_label,
         result.status_counts,
     )
     return result
