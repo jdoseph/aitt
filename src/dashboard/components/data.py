@@ -15,7 +15,7 @@ import streamlit as st
 from src.core import market
 from src.core.indicators import compute_metrics
 from src.core.market import MarketContext
-from src.core.storage import SignalRecord, Storage
+from src.core.storage import DossierRecord, SignalRecord, Storage
 from src.core.watchlist import Watchlist, load_watchlist
 from src.dashboard.components import theme
 
@@ -75,6 +75,9 @@ def overview_table() -> pd.DataFrame:
             rec = sigs.get(strategy)
             return rec.status if rec else ""
 
+        dossier = store.latest_dossier(entry.ticker)
+        bear = dossier.strongest_bear if dossier else ""
+
         max_conf = max((s.confidence for s in sigs.values()), default=0)
         cons = sigs.get("consolidation_breakout")
         cons_txt = ""
@@ -102,6 +105,7 @@ def overview_table() -> pd.DataFrame:
                 "conf": max_conf,
                 "stars": theme.stars(max_conf),
                 "action": _best_action(sigs),
+                "strongest_bear": bear,
             }
         )
 
@@ -130,6 +134,10 @@ def ticker_prices(ticker: str) -> pd.DataFrame:
 
 def latest_signals(ticker: str) -> dict[str, SignalRecord]:
     return _latest_signals(get_store(), ticker)
+
+
+def latest_dossier(ticker: str) -> DossierRecord | None:
+    return get_store().latest_dossier(ticker)
 
 
 @st.cache_data(ttl=300)

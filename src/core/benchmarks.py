@@ -15,6 +15,7 @@ import pandas as pd
 from loguru import logger
 
 from src.core.config import settings
+from src.core.indicators import ema
 
 
 def return_pct(df: pd.DataFrame, lookback: int) -> float | None:
@@ -62,6 +63,59 @@ def relative_strength_all(
         if rs is not None:
             out.append(rs)
     return out
+
+
+def above_own_ema(df: pd.DataFrame, span: int | None = None) -> bool | None:
+    """Whether the latest close sits above the index's own EMA. None if too thin."""
+    span = span or settings.regime_ema_span
+    if df is None or len(df) < span:
+        return None
+    e = float(ema(df["close"], span).iloc[-1])
+    return float(df["close"].iloc[-1]) > e
+
+
+@dataclass(frozen=True)
+class RegimeFlags:
+    """Informational market-regime read: each index above/below its own EMA.
+
+    This is the Session 9 *context* line (default 21-EMA). The canonical
+    RISK_ON / RISK_OFF gate (Session 10) uses a separate 50-EMA computation.
+    """
+
+    span: int
+    flags: dict[str, bool]  # symbol -> above its own EMA
+
+    @property
+    def supportive(self) -> bool:
+        """True when a majority of available indices are above their EMA."""
+        if not self.flags:
+            return False
+        return sum(self.flags.values()) >= (len(self.flags) + 1) // 2
+
+    def summary(self) -> str:
+        if not self.flags:
+            return "regime unknown"
+        up = [s for s, ok in self.flags.items() if ok]
+        down = [s for s, ok in self.flags.items() if not ok]
+        parts = []
+        if up:
+            parts.append(f"above {self.span} EMA: {', '.join(up)}")
+        if down:
+            parts.append(f"below: {', '.join(down)}")
+        return " · ".join(parts)
+
+
+def market_regime(
+    benchmarks: dict[str, pd.DataFrame], span: int | None = None
+) -> RegimeFlags:
+    """Per-index 'above its own EMA' flags (QQQ / SMH / SPY) — informational regime."""
+    span = span or settings.regime_ema_span
+    flags: dict[str, bool] = {}
+    for sym, df in benchmarks.items():
+        ok = above_own_ema(df, span)
+        if ok is not None:
+            flags[sym] = ok
+    return RegimeFlags(span=span, flags=flags)
 
 
 _cache: dict[tuple[str, ...], tuple[date, dict[str, pd.DataFrame]]] = {}

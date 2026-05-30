@@ -67,9 +67,11 @@ class Metrics:
     ema_9: float | None
     ema_21: float | None
     ema_50: float | None
+    ema_200: float | None
     dist_ema_9_pct: float | None
     dist_ema_21_pct: float | None
     dist_ema_50_pct: float | None
+    dist_ema_200_pct: float | None
     ath: float
     bars_since_ath: int
     pullback_from_ath_pct: float
@@ -81,6 +83,12 @@ class Metrics:
         if self.ema_50 is None:
             return None
         return self.close > self.ema_50
+
+    @property
+    def above_200_ema(self) -> bool | None:
+        if self.ema_200 is None:
+            return None
+        return self.close > self.ema_200
 
 
 def compute_metrics(df: pd.DataFrame, ath_lookback: int | None = None) -> Metrics:
@@ -99,7 +107,7 @@ def compute_metrics(df: pd.DataFrame, ath_lookback: int | None = None) -> Metric
             return None
         return float(ema(df["close"], span).iloc[-1])
 
-    e9, e21, e50 = ema_last(9), ema_last(21), ema_last(50)
+    e9, e21, e50, e200 = ema_last(9), ema_last(21), ema_last(50), ema_last(200)
     ath, bars_since = all_time_high(df, ath_lookback)
     vol_avg = float(average_volume(df).iloc[-1])
     volume = float(last["volume"])
@@ -114,9 +122,11 @@ def compute_metrics(df: pd.DataFrame, ath_lookback: int | None = None) -> Metric
         ema_9=e9,
         ema_21=e21,
         ema_50=e50,
+        ema_200=e200,
         dist_ema_9_pct=None if e9 is None else distance_pct(close, e9),
         dist_ema_21_pct=None if e21 is None else distance_pct(close, e21),
         dist_ema_50_pct=None if e50 is None else distance_pct(close, e50),
+        dist_ema_200_pct=None if e200 is None else distance_pct(close, e200),
         ath=ath,
         bars_since_ath=bars_since,
         pullback_from_ath_pct=pullback_pct,

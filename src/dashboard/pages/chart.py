@@ -6,7 +6,7 @@ import json
 
 import streamlit as st
 
-from src.dashboard.components import charts, data, legend, scorecard, theme
+from src.dashboard.components import charts, data, dossier, legend, scorecard, theme
 
 
 def render() -> None:
@@ -55,6 +55,12 @@ def render() -> None:
         best = max(cards, key=lambda s: scorecard.ACTION_RANK.get(s.get("action", ""), -1))
         with st.container(border=True):
             scorecard.render_scorecard(best)
+
+    # Trade due-diligence dossier (bull/bear case + trade plan).
+    drec = data.latest_dossier(ticker)
+    if drec:
+        with st.container(border=True):
+            dossier.render_dossier(json.loads(drec.summary or "{}"))
 
     # Catalysts: earnings beat/miss + recent headlines (context only).
     catalysts = next(

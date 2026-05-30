@@ -27,6 +27,23 @@ def test_add_emas_adds_columns() -> None:
     assert out["ema_21"].iloc[-1] == pytest.approx(100.0)
 
 
+def test_metrics_ema_200_and_alignment() -> None:
+    # 260 rising bars -> price above both the 50 and 200 EMA.
+    df = make_ohlcv([100.0 + i for i in range(260)])
+    m = ind.compute_metrics(df)
+    assert m.ema_200 is not None
+    assert m.dist_ema_200_pct is not None and m.dist_ema_200_pct > 0
+    assert m.above_50_ema is True
+    assert m.above_200_ema is True
+
+
+def test_metrics_ema_200_none_when_thin() -> None:
+    m = ind.compute_metrics(make_ohlcv([100.0] * 60))  # < 200 bars
+    assert m.ema_200 is None
+    assert m.dist_ema_200_pct is None
+    assert m.above_200_ema is None
+
+
 def test_distance_pct_sign() -> None:
     assert ind.distance_pct(110, 100) == pytest.approx(10.0)
     assert ind.distance_pct(90, 100) == pytest.approx(-10.0)

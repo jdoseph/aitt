@@ -80,6 +80,20 @@ class BacktestStat(SQLModel, table=True):
     computed_at: datetime = Field(default_factory=_utcnow)
 
 
+class DossierRecord(SQLModel, table=True):
+    """A per-ticker trade due-diligence dossier for a given day (Session 9)."""
+
+    __tablename__ = "dossiers"
+
+    ticker: str = Field(primary_key=True)
+    date: Date = Field(primary_key=True)
+    grade: str = ""
+    strongest_bull: str = ""
+    strongest_bear: str = ""
+    summary: str = ""  # JSON blob from Dossier.to_summary()
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class AlertRecord(SQLModel, table=True):
     """A fired alert (a noteworthy signal transition)."""
 
@@ -292,6 +306,39 @@ class Storage:
             s.add(rec)
             s.commit()
             return True
+
+    # --- dossiers --------------------------------------------------------- #
+    def upsert_dossier(
+        self,
+        *,
+        ticker: str,
+        date: Date,
+        grade: str,
+        strongest_bull: str,
+        strongest_bear: str,
+        summary: dict[str, Any],
+    ) -> DossierRecord:
+        """Upsert the dossier keyed by (ticker, date)."""
+        ticker = ticker.upper()
+        with self.session() as s:
+            rec = s.get(DossierRecord, (ticker, date)) or DossierRecord(ticker=ticker, date=date)
+            rec.grade = grade
+            rec.strongest_bull = strongest_bull
+            rec.strongest_bear = strongest_bear
+            rec.summary = json.dumps(summary)
+            rec.created_at = _utcnow()
+            s.merge(rec)
+            s.commit()
+            return rec
+
+    def latest_dossier(self, ticker: str) -> DossierRecord | None:
+        """Most recent dossier for a ticker (None if never graded)."""
+        with self.session() as s:
+            return s.exec(
+                select(DossierRecord)
+                .where(DossierRecord.ticker == ticker.upper())
+                .order_by(col(DossierRecord.date).desc())
+            ).first()
 
     # --- backtest stats --------------------------------------------------- #
     def get_backtest_stats(self, ticker: str, strategy: str, status: str) -> list[BacktestStat]:

@@ -27,9 +27,11 @@ def format_alert(alert: Alert) -> str:
 
 
 def composite_block(alert: Alert) -> str:
-    """Headline plus the indented scorecard checks (when the alert was graded)."""
+    """Headline, the scorecard checks, and the top 'why NOT buy' factors."""
     lines = [format_alert(alert)]
     lines.extend(f"    {line}" for line in alert.scorecard_lines)
+    if alert.bear_reasons:
+        lines.append(f"    Why NOT: {' · '.join(alert.bear_reasons)}")
     return "\n".join(lines)
 
 

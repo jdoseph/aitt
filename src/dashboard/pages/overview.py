@@ -66,6 +66,7 @@ def render() -> None:
     display_cols = [
         "ticker", "name", "layer_title", "price", "chg_%",
         "dist_9_%", "dist_21_%", "pullback_%", "EMA", "ATH", "FLAG", "IPO", "stars", "action",
+        "strongest_bear",
     ]
     st.dataframe(
         view[display_cols],
@@ -79,6 +80,7 @@ def render() -> None:
             "dist_21_%": st.column_config.NumberColumn("Δ21 %", format="%.2f"),
             "pullback_%": st.column_config.NumberColumn("Δ ATH %", format="%.2f"),
             "price": st.column_config.NumberColumn("price", format="%.2f"),
+            "strongest_bear": st.column_config.TextColumn("⛔ top bear factor"),
         },
     )
     st.caption(

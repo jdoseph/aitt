@@ -37,7 +37,8 @@ class Settings(BaseSettings):
     watchlist_path: Path = Field(default=Path("src/core/watchlist.yaml"))
 
     # --- data layer ---
-    history_bars: int = 200
+    # 260 ≈ one trading year, enough to meaningfully warm the 200 EMA (Session 9).
+    history_bars: int = 260
     data_source: str = "yfinance"
     fetch_max_retries: int = 3
     fetch_retry_backoff_sec: float = 2.0
@@ -97,6 +98,19 @@ class Settings(BaseSettings):
     backtest_win_warn_pct: float = 50.0
     news_days: int = 7
     news_max_items: int = 5
+
+    # --- Session 9: trade due diligence dossier ---
+    # Above this much over the 50 EMA the setup reads as "chasing" (a bear point).
+    ema_chasing_pct: float = 15.0
+    # Span used for the *informational* market-regime line (QQQ/SMH vs own EMA).
+    # The canonical RISK_ON/OFF gate (Session 10) uses its own 50-EMA span.
+    regime_ema_span: int = 21
+    # Profit-take levels suggested in the trade plan (percent above entry).
+    profit_target_pcts: list[float] = Field(default_factory=lambda: [10.0, 15.0])
+    # Cap on reasons shown per side of the bull/bear case.
+    dossier_max_reasons: int = 6
+    # Top N bear factors surfaced next to the grade in alerts.
+    dossier_bear_in_alert: int = 2
 
     # --- alerts ---
     min_confidence_stars: int = 1

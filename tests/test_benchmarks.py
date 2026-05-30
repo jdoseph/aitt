@@ -43,3 +43,37 @@ def test_relative_strength_all_skips_missing() -> None:
     }
     out = bm.relative_strength_all(t, benches, lookback=5)
     assert [rs.benchmark for rs in out] == ["SPY"]
+
+
+# --- Session 9: informational market regime --------------------------------- #
+def test_above_own_ema_uptrend_and_downtrend() -> None:
+    up = make_ohlcv([100.0 + i for i in range(40)])
+    down = make_ohlcv([140.0 - i for i in range(40)])
+    assert bm.above_own_ema(up, span=21) is True
+    assert bm.above_own_ema(down, span=21) is False
+
+
+def test_above_own_ema_thin_history() -> None:
+    assert bm.above_own_ema(make_ohlcv([100.0] * 10), span=21) is None
+
+
+def test_market_regime_supportive_when_majority_above() -> None:
+    up = make_ohlcv([100.0 + i for i in range(40)])
+    down = make_ohlcv([140.0 - i for i in range(40)])
+    regime = bm.market_regime({"QQQ": up, "SMH": up, "SPY": down}, span=21)
+    assert regime.flags == {"QQQ": True, "SMH": True, "SPY": False}
+    assert regime.supportive is True
+
+
+def test_market_regime_weak_and_summary() -> None:
+    down = make_ohlcv([140.0 - i for i in range(40)])
+    regime = bm.market_regime({"QQQ": down, "SMH": down}, span=21)
+    assert regime.supportive is False
+    assert "below" in regime.summary()
+
+
+def test_market_regime_empty_benchmarks() -> None:
+    regime = bm.market_regime({})
+    assert regime.flags == {}
+    assert regime.supportive is False
+    assert regime.summary() == "regime unknown"

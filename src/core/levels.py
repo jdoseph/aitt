@@ -6,9 +6,12 @@ resistance/headroom and risk/reward checks (Session 7).
 
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 
 from src.core.config import settings
+from src.core.indicators import Metrics
 
 
 def swing_highs(df: pd.DataFrame, k: int | None = None) -> list[float]:
@@ -85,3 +88,41 @@ def risk_reward(entry: float, stop: float, target: float | None) -> float | None
     if risk <= 0 or reward <= 0:
         return None
     return reward / risk
+
+
+# Plain-text invalidation per setup type (Session 9 dossier).
+_INVALIDATION_TEXT = {
+    "ema_pullback": "close below the 21 EMA",
+    "consolidation_breakout": "breakdown back into the base (below the range low)",
+    "ath_pullback": "loss of the recent swing low",
+    "ipo_base": "drop back below the IPO base",
+}
+
+
+def strategy_stop(df: pd.DataFrame, signal: Any, metrics: Metrics) -> float:
+    """A stop placed by setup type, not one-size-fits-all (Session 9 dossier).
+
+    EMA pullback → just below the 21 EMA; consolidation → below the range low;
+    IPO base → below the IPO high (the broken-out level); everything else (ATH
+    dip) → the generic swing-low :func:`suggested_stop`.
+    """
+    strat = getattr(signal, "strategy_name", "")
+    details = getattr(signal, "details", {}) or {}
+    price = metrics.close
+
+    if strat == "ema_pullback" and metrics.ema_21 is not None:
+        return round(min(metrics.ema_21, price) * 0.99, 4)
+    if strat == "consolidation_breakout":
+        low = details.get("range_low")
+        if low:
+            return round(float(low) * 0.99, 4)
+    if strat == "ipo_base":
+        ipo_high = details.get("ipo_high")
+        if ipo_high:
+            return round(float(ipo_high) * 0.99, 4)
+    return suggested_stop(df, price)
+
+
+def invalidation_text(signal: Any) -> str:
+    """Plain-language condition that would invalidate the setup."""
+    return _INVALIDATION_TEXT.get(getattr(signal, "strategy_name", ""), "loss of the 50 EMA")

@@ -78,7 +78,7 @@ uv run mypy src           # strict type check
 - [ ] Session 6 — testing, edge cases, polish
 - [x] **Session 7** — setup quality scorecard (trend / volume / earnings / rel-strength / R:R / resistance / leading layer / breadth) + composite grade
 - [x] **Session 8** — evidence layer: historical win-rate replay + catalysts (earnings beat/miss + headlines)
-- [ ] Session 9 — trade due diligence dossier: bull vs bear case ("why NOT buy?") + trade plan (stop/invalidation/targets/sizing)
+- [x] **Session 9** — trade due diligence dossier: bull vs bear case ("why NOT buy?") + trade plan (stop/invalidation/targets/sizing) + EMA-200 alignment + informational market regime
 - [ ] Session 10 — market-regime gate (indices vs 50 EMA) + automatic disqualifiers (suppress bad alerts at the source)
 - [ ] Session 11 — 0-100 composite score + cross-sectional ranking + allocation + layer rotation + AI-thesis tracker
 - [ ] Session 12 — deeper signals: accumulation (OBV/A-D), weekly trend alignment, Weinstein stage, ATR crowding, AI-capex exposure

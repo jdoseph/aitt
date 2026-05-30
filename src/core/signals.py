@@ -12,6 +12,7 @@ ATH-freshness gate, volume requirement, and confidence threshold from config.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date as Date
@@ -23,6 +24,7 @@ from loguru import logger
 from src.core import market, scorecard
 from src.core.backtest import HistoricalStat
 from src.core.config import settings
+from src.core.dossier import Dossier, DossierContext, build_dossier
 from src.core.scorecard import ScoreContext
 from src.core.storage import Storage
 from src.core.strategies.ath_pullback import ATHPullbackStrategy
@@ -72,6 +74,7 @@ class Alert:
     date: Date
     action: str | None = None  # scorecard grade, if scored
     scorecard_lines: list[str] = field(default_factory=list)
+    bear_reasons: list[str] = field(default_factory=list)  # top "why NOT buy" factors
 
 
 @dataclass
@@ -83,6 +86,7 @@ class CycleResult:
     alerts: list[Alert] = field(default_factory=list)
     breadth_summary: str = ""
     leading_layers: list[str] = field(default_factory=list)
+    dossiers: dict[str, Dossier] = field(default_factory=dict)  # ticker -> dossier
 
 
 def _stars(n: int) -> str:
@@ -171,6 +175,16 @@ class _Evaluated:
     bar_date: Date  # signal.date, already known non-None at collection time
 
 
+@dataclass
+class _PendingAlert:
+    """An alert decided in pass 2, finalized once dossiers (bear reasons) exist."""
+
+    ev: _Evaluated
+    severity: str
+    message: str
+    card: scorecard.Scorecard | None
+
+
 class SignalEngine:
     """Runs all strategies over a price map and reconciles signals/alerts with the DB.
 
@@ -232,13 +246,26 @@ class SignalEngine:
         beat_cache: dict[str, str | None] = {}
         news_cache: dict[str, list[dict[str, Any]]] = {}
 
-        # --- pass 2: score, persist, alert ---
+        # --- pass 2: score, persist, collect pending alerts ---
+        # Dossiers are per-ticker and need each ticker's full set of graded cards,
+        # so we defer building them (and the in-memory Alert objects) until after
+        # this loop. The signal/alert DB rows are still written inline here.
+        cards_by_ticker: dict[str, list[tuple[Signal, scorecard.Scorecard]]] = defaultdict(list)
+        signals_by_ticker: dict[str, list[Signal]] = defaultdict(list)
+        df_by_ticker: dict[str, pd.DataFrame] = {}
+        date_by_ticker: dict[str, Date] = {}
+        pending: list[_PendingAlert] = []
+
         for ev in evaluated:
             sig, strat = ev.signal, ev.strategy
+            signals_by_ticker[ev.ticker].append(sig)
+            df_by_ticker[ev.ticker] = ev.df
+            date_by_ticker[ev.ticker] = ev.bar_date
             card = None
             details = dict(sig.details)
             if self.enable_scorecard and sig.status in GRADEABLE_STATUSES:
                 card = self._score(ev, ctx_market, benchmarks, layer_of, earnings_cache, beat_cache)
+                cards_by_ticker[ev.ticker].append((sig, card))
                 details["scorecard"] = card.to_summary()
                 catalysts = self._catalysts(ev.ticker, beat_cache, news_cache)
                 if catalysts["beat"] or catalysts["headlines"]:
@@ -272,20 +299,33 @@ class SignalEngine:
                     confidence=sig.confidence,
                     patterns=sig.patterns_detected,
                 )
-                result.alerts.append(
-                    Alert(
-                        ticker=sig.ticker,
-                        strategy=strat.name,
-                        status=sig.status,
-                        severity=severity,
-                        message=message,
-                        confidence=sig.confidence,
-                        patterns=list(sig.patterns_detected),
-                        date=ev.bar_date,
-                        action=card.action if card else None,
-                        scorecard_lines=card.render_lines() if card else [],
-                    )
+                pending.append(_PendingAlert(ev=ev, severity=severity, message=message, card=card))
+
+        # --- dossiers: one per graded ticker (bull/bear case + trade plan) ---
+        dossiers = self._build_dossiers(
+            cards_by_ticker, signals_by_ticker, df_by_ticker, date_by_ticker, benchmarks
+        )
+        result.dossiers = dossiers
+
+        # --- finalize alerts, folding in each ticker's "why NOT buy" factors ---
+        for p in pending:
+            dossier = dossiers.get(p.ev.ticker)
+            card = p.card
+            result.alerts.append(
+                Alert(
+                    ticker=p.ev.ticker,
+                    strategy=p.ev.strategy.name,
+                    status=p.ev.signal.status,
+                    severity=p.severity,
+                    message=p.message,
+                    confidence=p.ev.signal.confidence,
+                    patterns=list(p.ev.signal.patterns_detected),
+                    date=p.ev.bar_date,
+                    action=card.action if card else None,
+                    scorecard_lines=card.render_lines() if card else [],
+                    bear_reasons=dossier.top_bear() if dossier else [],
                 )
+            )
 
         result.breadth_summary = ctx_market.breadth.summary()
         result.leading_layers = [k for k, _ in ctx_market.leadership[: settings.leading_layers_top_n]]
@@ -298,6 +338,35 @@ class SignalEngine:
             )
         )
         return result
+
+    def _build_dossiers(
+        self,
+        cards_by_ticker: dict[str, list[tuple[Signal, scorecard.Scorecard]]],
+        signals_by_ticker: dict[str, list[Signal]],
+        df_by_ticker: dict[str, pd.DataFrame],
+        date_by_ticker: dict[str, Date],
+        benchmarks: dict[str, pd.DataFrame],
+    ) -> dict[str, Dossier]:
+        """Build + persist one dossier per graded ticker (using its best scorecard)."""
+        out: dict[str, Dossier] = {}
+        for ticker, cards in cards_by_ticker.items():
+            best_sig, best_card = max(
+                cards, key=lambda sc: (_ACTION_RANK.get(sc[1].action, -1), sc[1].score)
+            )
+            ctx = DossierContext(
+                df=df_by_ticker[ticker], benchmarks=benchmarks, best_signal=best_sig
+            )
+            dossier = build_dossier(ticker, signals_by_ticker[ticker], best_card, ctx)
+            out[ticker] = dossier
+            self.store.upsert_dossier(
+                ticker=ticker,
+                date=date_by_ticker[ticker],
+                grade=dossier.grade,
+                strongest_bull=dossier.strongest_bull or "",
+                strongest_bear=dossier.strongest_bear or "",
+                summary=dossier.to_summary(),
+            )
+        return out
 
     def _score(
         self,

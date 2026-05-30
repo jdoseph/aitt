@@ -126,7 +126,7 @@ ai-infra-tracker/
 
 Build this project across **12 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
 
-> **Status:** Sessions 1–5, **7**, and **8** are complete (on `main`). Remaining: **6** (hardening/polish), **9** (Dossier — bull/bear + trade plan), **10** (Regime gate + disqualifiers), **11** (Composite score + cross-sectional ranking + rotation + thesis), **12** (Deeper signals: accumulation / weekly / Weinstein stage / crowding / capex). Sessions 9–12 build on the scorecard (7) and evidence (8). A deferred **v2 portfolio-aware track** is described after Session 12.
+> **Status:** Sessions 1–5, **7**, **8**, and **9** are complete (on `main`). Remaining: **6** (hardening/polish), **10** (Regime gate + disqualifiers), **11** (Composite score + cross-sectional ranking + rotation + thesis), **12** (Deeper signals: accumulation / weekly / Weinstein stage / crowding / capex). Sessions 10–12 build on the scorecard (7), evidence (8), and dossier (9). A deferred **v2 portfolio-aware track** is described after Session 12.
 >
 > **Theme of 10–12:** move the agent from a *chart scanner* ("is there a setup?") to a *decision-support tool* ("which AI-infra names deserve capital today, and which bad setups should never reach the dashboard?").
 
