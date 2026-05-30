@@ -22,7 +22,7 @@ The watchlist and value chain understanding is informed by:
 
 ## Working with this spec
 
-**This project is built across 9 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
+**This project is built across 12 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
 
 1. **Re-read this CLAUDE.md** — it may have been updated since the last session
 2. **Check the Open questions section** — resolve any 🔴 items before writing code if not yet answered
@@ -85,6 +85,13 @@ ai-infra-tracker/
 │   │   ├── backtest.py         # Historical signal win-rate replay (Session 8)
 │   │   ├── news.py             # Recent catalysts via yfinance headlines (Session 8)
 │   │   ├── dossier.py          # Bull/bear case + trade plan (Session 9)
+│   │   ├── regime.py           # Market regime RISK_ON/OFF from indices vs 50 EMA (Session 10)
+│   │   ├── gating.py           # Automatic disqualifiers / alert suppression (Session 10)
+│   │   ├── scoring.py          # 0-100 composite setup score (Session 11)
+│   │   ├── ranking.py          # Cross-sectional RS rank, opportunity order, allocation (Session 11)
+│   │   ├── accumulation.py     # OBV / A-D / up-down volume (Session 12)
+│   │   ├── multitimeframe.py   # Weekly trend alignment (Session 12)
+│   │   ├── stage.py            # Weinstein Stage 1-4 classification (Session 12)
 │   │   └── storage.py          # SQLite ORM (SQLModel)
 │   ├── agent/
 │   │   ├── scheduler.py        # APScheduler entry point
@@ -117,9 +124,11 @@ ai-infra-tracker/
 
 ## Implementation sessions
 
-Build this project across **9 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
+Build this project across **12 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
 
-> **Status:** Sessions 1–5 and **7** are complete (on `main`). Remaining: **Session 6** (hardening/polish), **Session 8** (Evidence layer: historical edge + catalysts), and **Session 9** (Trade Due Diligence Dossier — bull/bear case + trade plan). Sessions can be built in any order, but 8 and 9 build on 7 (done).
+> **Status:** Sessions 1–5, **7**, and **8** are complete (on `main`). Remaining: **6** (hardening/polish), **9** (Dossier — bull/bear + trade plan), **10** (Regime gate + disqualifiers), **11** (Composite score + cross-sectional ranking + rotation + thesis), **12** (Deeper signals: accumulation / weekly / Weinstein stage / crowding / capex). Sessions 9–12 build on the scorecard (7) and evidence (8). A deferred **v2 portfolio-aware track** is described after Session 12.
+>
+> **Theme of 10–12:** move the agent from a *chart scanner* ("is there a setup?") to a *decision-support tool* ("which AI-infra names deserve capital today, and which bad setups should never reach the dashboard?").
 
 ---
 
@@ -321,6 +330,89 @@ Build this project across **9 sequential sessions**. Each session is self-contai
 - Trade plan: the stop differs by setup type; invalidation text is present; the sizing tier follows the grade.
 - Composite alert and the Chart dossier panel show the bull/bear case.
 - `pytest tests/ -v` and `mypy --strict` green.
+
+---
+
+### Session 10 — Market-Regime Gate + Automatic Disqualifiers
+
+**Goal:** Stop low-quality alerts *at the source*. A market-regime read and a set of hard disqualifier rules suppress (or downgrade) alerts regardless of how good the chart looks — "maximize odds, not signal count." The single highest-leverage filter in the whole system.
+
+**Build:**
+- `src/core/regime.py` — `market_regime(benchmarks)` → `RISK_ON | NEUTRAL | RISK_OFF` from SPY / QQQ / SMH vs their **50 EMA** (RISK_OFF if ≥ `regime_risk_off_fails` of 3 are below; RISK_ON if all above; else NEUTRAL). Returns per-index flags + the label. (Distinct from Session 9's informational 21-EMA regime line; this is the canonical gating regime — Session 9 may reuse it.)
+- `src/core/gating.py` — `disqualifiers(signal, scorecard, regime) -> list[str]` of tripped hard rules; each rule individually toggleable in config. Defaults: price **below the 50 EMA**, earnings within `dq_earnings_days` (3), relative strength **below market**, **declining volume**, and (optional) **R:R below `dq_min_rr`**. `disqualifier_mode`: `"suppress"` (no alert) or `"downgrade"` (alert fires but grade is capped and flagged).
+- Integrate into `signals.py`: compute the regime once per cycle (from the benchmarks already fetched); run every would-be alert through `disqualifiers`. Suppressed setups are still **recorded as signals** (visible in the dashboard) but fire **no notification**. In RISK_OFF, raise the alert bar (`risk_off_min_stars`) and discount aggressive buys.
+- `agent/notify.py` — alerts carry a **regime banner**; note when running in RISK_OFF.
+- Dashboard — a **regime badge** in the Overview header (🟢 RISK_ON / 🟡 NEUTRAL / 🔴 RISK_OFF) and a "disqualified" marker on setups that were suppressed.
+- `config.py` — `regime_ema_span` (50), `regime_risk_off_fails` (2), `disqualifier_mode` ("suppress"), per-rule toggles (`dq_below_50ema`, `dq_earnings_days` 3, `dq_rs_below_market`, `dq_declining_volume`, `dq_min_rr` off by default), `risk_off_min_stars`.
+- Tests: `test_regime.py` (label from synthetic index sets), `test_gating.py` (each rule trips → suppress/downgrade).
+
+**Verify before moving on:**
+- Regime label correct for synthetic SPY/QQQ/SMH sets (all-above → RISK_ON; 2-below → RISK_OFF).
+- A setup below the 50 EMA or with earnings in 2 days is **suppressed** (no alert) in "suppress" mode, but still stored.
+- RISK_OFF raises the alert bar (fewer / de-prioritized alerts) and shows in the dashboard banner.
+- `pytest tests/ -v` and `mypy --strict` green.
+
+---
+
+### Session 11 — Composite Score + Cross-Sectional Ranking + Rotation + Thesis
+
+**Goal:** Move from grading each stock in isolation to ranking *every* name against each other — "is this the best place for my next dollar?" Produce a 0–100 composite, rank the whole watchlist, suggest an allocation, and surface layer rotation + AI-thesis health.
+
+**Build:**
+- `src/core/scoring.py` — `composite_score(...)` → **0–100**, weighted by category (Technical 30 / Relative-strength 20 / Volume-Accumulation 15 / Market-regime 10 / Earnings 10 / Value-chain leadership 10 / Catalyst 5; weights in config). Maps the existing scorecard checks (+ Session 12 inputs when present) to category subscores; degrades gracefully when a category is `n/a`.
+- `src/core/ranking.py` — cross-sectional: `rs_rank(...)` (percentile rank of each name's relative strength → "top 5%"); `rank_opportunities(scored)` (ordered best→worst with composite scores → opportunity-cost view, "pass on ETN, better exist"); `suggest_allocation(top_n)` (normalized % weights across the top N, proportional to score).
+- `src/core/market.py` (extend) — `layer_strength()` (0–100 per value-chain layer) and `layer_rotation(history)` (Δ in layer strength vs a prior window → money flowing in/out, ▲/▼); `thesis_health(leaders)` → `Healthy | Deteriorating` from whether the key leaders hold their 50 EMA.
+- `storage.py` — a small `daily_scores` / `layer_strength` table so rotation (Δ over time) and a score history exist.
+- Integrate: orchestrator computes the composite per gradeable signal + the cross-sectional ranks; alerts/notify include **score + rank** ("NVDA 91/100 · #2 of 41"). *(Stretch: weight the Session 8 historical win-rate by the current regime — regime-conditional base rates.)*
+- Dashboard — **Overview** sortable by composite (new default), a **"Top opportunities today"** panel with suggested allocation %, and the **Value-Chain** page gains a layer-strength bar + rotation arrows + a thesis-health banner.
+- `config.py` — category weights, `top_opportunities_n` (5), `rotation_lookback_days`, thesis-leaders list (or derive from capex exposure / market cap).
+- Tests: `test_scoring.py` (subscores + 0–100), `test_ranking.py` (percentile rank, ordering, allocation sums ~100%), layer rotation + thesis flips.
+
+**Verify before moving on:**
+- Composite 0–100 computed; category subscores sum correctly; `n/a` categories handled.
+- Cross-sectional RS rank puts the strongest names in the top percentile.
+- Opportunity ranking orders best→worst; suggested allocation sums to ~100%.
+- Layer strength + rotation: a layer with improving signals scores higher / shows ▲.
+- Thesis health flips to "Deteriorating" when the leaders lose their 50 EMA.
+- Dashboard sorts by score and shows the Top-opportunities + allocation panel.
+- `pytest tests/ -v` and `mypy --strict` green.
+
+---
+
+### Session 12 — Deeper Signals (institutional intent + trend context)
+
+**Goal:** Add the institutional-accumulation and trend-context signals that feed the composite score and dossier — the inputs that tell you *whether big money is actually behind the move* and *what stage the stock is in*.
+
+**Build:**
+- `src/core/accumulation.py` — OBV, Accumulation/Distribution line, up-vs-down-volume ratio, and close-position-in-range; an `accumulation_score` (e.g., OBV trend up + A/D rising + closes near highs = institutions accumulating). Feeds the Volume-Accumulation category.
+- `src/core/multitimeframe.py` — resample daily → weekly; `weekly_trend(df)` (above/below the 30-week MA + slope) → `uptrend | downtrend | neutral`; an alignment flag with the daily setup (weekly-uptrend + daily pullback = stronger; weekly-downtrend = weaker).
+- `src/core/stage.py` — Weinstein **Stage 1–4** classification (basing / advancing / topping / declining) from price vs the 30-week MA and its slope. A `AT_21_EMA` pullback in Stage 2 ≠ the same in Stage 4.
+- `src/core/indicators.py` — add **ATR** (and `EMA_200` if Session 9 hasn't already); express extension/crowding **in ATRs** (volatility-normalized, so RDW and TXN are judged on their own scale); a `crowding_score` (% above the 200 EMA + recent run-up, ATR-normalized).
+- `src/core/watchlist.yaml` + `watchlist.py` — add a curated **`capex_exposure`** (0–100) per ticker (how directly the name benefits from AI capex); loaded and fed into scoring as the AI-capex factor.
+- Integrate: these become composite-score inputs and dossier/scorecard context (e.g., **downgrade a Stage-4 pullback**, reward weekly-uptrend alignment, penalize high crowding).
+- `config.py` — accumulation lookbacks, `weekly_ma_weeks` (30), stage thresholds, `atr_window` (14), crowding thresholds.
+- Tests: `test_accumulation.py` (accumulation vs distribution synthetic series), `test_multitimeframe.py` (weekly resample + alignment), `test_stage.py` (Stage 2 vs Stage 4), ATR/crowding.
+
+**Verify before moving on:**
+- OBV / A-D / accumulation score behave correctly on synthetic accumulation vs distribution data.
+- Weekly resample is correct; the alignment flag matches the weekly trend.
+- Stage classification: a synthetic Stage-2 advance vs a Stage-4 decline classify correctly.
+- ATR-normalized extension distinguishes a volatile name from a calm one at the same % distance.
+- `capex_exposure` loads from YAML and moves the composite score.
+- `pytest tests/ -v` and `mypy --strict` green.
+
+---
+
+### v2 / Future — Portfolio-aware decision support (deferred, not yet a buildable session)
+
+Everything above is **stateless about what you own**. The natural next leap needs a **holdings input** (a positions file/config: `ticker, entry, size, date`). Once the agent knows your portfolio it can answer the harder questions:
+
+- **Position management / exits** — the under-served half of trading: `HOLD / TRIM / TAKE-PROFIT / EXIT` per holding (e.g., close below the 50 EMA → EXIT; +X% → TRIM; trailing stop). Most systems only plan entries.
+- **Portfolio-aware sizing & concentration** — discount new signals in layers/themes you're already heavy in; cap value-chain concentration (e.g., "already 40% networking → halve the CRDO size").
+- **Opportunity cost vs holdings** — "is this a better dollar than what you already hold?", not just better than cash.
+- **Bayesian probability of success** — a calibrated win probability blended from setup type + **regime-conditional** historical win-rate + RS + earnings proximity, replacing/augmenting the star rating.
+
+These depend on a holdings store + a light trade journal (see open question #17) and some calibration data. **Scope when requested** — they change the agent from a watchlist scanner into a portfolio co-pilot.
 
 ---
 
@@ -680,13 +772,13 @@ streamlit run src/dashboard/app.py               # dashboard at localhost:8501
 ## Out of scope (for v1)
 
 - Brokerage integration / automated order placement
-- Intraday timeframes (4h, 1h) — daily only first
+- Intraday timeframes (4h, 1h) — daily only (a higher **weekly** timeframe for trend alignment is added in Session 12; 4h/1h intraday stays out)
 - Full backtesting framework (a *lightweight* per-setup win-rate replay is now in Session 8; a full strategy backtester/optimizer stays out)
 - Options flow / unusual options activity
 - News sentiment / NLP on earnings calls
-- Relative strength ranking system (v2 candidate)
-- Automated position sizing / risk management (Session 9 adds *informational* sizing tiers, stop/target, and profit-take levels — surfaced as suggestions, never auto-executed; actual order placement stays out)
-- Sector rotation quantitative model (qualitative in v1 via value chain view)
+- Relative strength ranking system → **now Session 11** (cross-sectional percentile rank + opportunity ordering)
+- Automated position sizing / risk management (Session 9 adds *informational* sizing tiers, stop/target, and profit-take levels; Session 11 adds suggested allocation % — all suggestions, never auto-executed; actual order placement stays out; **portfolio-aware sizing/exits = v2 track**)
+- Sector rotation quantitative model → **now Session 11** (numeric layer strength + rotation Δ; was qualitative-only)
 
 These are good v2 candidates but would balloon scope.
 
@@ -720,15 +812,15 @@ Tagged by priority. **Resolve 🔴 before writing code.** Update this section as
 
 ### 🟢 Nice-to-have (defer to v2 unless requested)
 
-17. **Trade journal.** Let user mark "I bought this alert at $X" and track outcomes.
+17. **Trade journal.** Let user mark "I bought this alert at $X" and track outcomes. → **Part of the deferred v2 portfolio-aware track** (needs a holdings input; see after Session 12).
 18. **Historical signal viewer.** → **Scheduled (Session 8):** a lightweight per-setup historical replay computes the forward 5/10/20-day win rate for each (ticker, strategy, status). Not a full backtester — just base rates for the scorecard's "historical edge" check.
 19. **International tickers.** yfinance supports SIE.DE, 6981.T, etc. Include non-ADR foreign tickers?
-20. **Multi-timeframe.** 4h and 1h EMAs alongside daily.
+20. **Multi-timeframe.** 4h and 1h EMAs alongside daily. → **Weekly** trend alignment is now Session 12; 4h/1h intraday stays a v2 candidate.
 21. **News/catalyst tagging.** → **Scheduled (Session 8):** recent headlines via yfinance + an earnings-beat heuristic feed the scorecard's "catalysts" check. Earnings proximity is its own check (Session 7). No NLP/sentiment.
 22. **Relative strength overlay.** → **Scheduled (Session 7):** relative strength vs SPY / QQQ / SMH is a scorecard check; the dashboard can surface the strongest names.
 23. **IPO news scanner.** Auto-detect Anthropic/OpenAI IPO filings (S-1, pricing) from news feeds and auto-add tickers.
-24. **Value chain flow alerts.** "3 out of 5 interconnect stocks are consolidating" — layer-level signal aggregation.
-25. **Sector rotation detection.** When money moves between value chain layers (e.g., from semis to power), flag the shift.
+24. **Value chain flow alerts.** "3 out of 5 interconnect stocks are consolidating" — layer-level signal aggregation. → **Scheduled (Session 11)** via layer-strength scoring.
+25. **Sector rotation detection.** When money moves between value chain layers (e.g., from semis to power), flag the shift. → **Scheduled (Session 11)** via layer-rotation Δ.
 26. **Chart pattern detection (multi-week).** Double bottom, inverse head and shoulders, cup and handle — heavier computation but higher conviction signals.
 
 ### Assumptions made silently (override anytime)
