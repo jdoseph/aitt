@@ -53,8 +53,20 @@ def evaluate_signals(
         ),
         earnings_beat_provider=news.earnings_beat,
         news_provider=news.recent_headlines,
+        benchmark_price_provider=_latest_benchmark_close,
     )
     return engine.run_cycle(price_map)
+
+
+def _latest_benchmark_close() -> float | None:
+    """Latest close of the portfolio benchmark (VOO) for the NAV overlay."""
+    from src.core.data import DataFetchError, fetch_prices
+
+    try:
+        df = fetch_prices(settings.portfolio_benchmark, bars=5)
+    except DataFetchError:
+        return None
+    return None if df.empty else float(df["close"].iloc[-1])
 
 
 def fire_alerts(result: CycleResult) -> int:
@@ -117,15 +129,17 @@ def run_once(store: Storage | None = None, *, fetch: bool = True) -> CycleResult
         result = evaluate_signals(store)
 
     fire_alerts(result)
+    notify.log_portfolio_summary(result)
     logger.info(
         "cycle done: {} tickers, {} signals, {} alerts ({} suppressed) "
-        "(date={}, regime={}) | statuses={}",
+        "(date={}, regime={}, exposure={:.0%}) | statuses={}",
         result.n_tickers,
         result.n_signals,
         len(result.alerts),
         result.n_suppressed,
         result.bar_date,
         result.regime_label,
+        result.exposure,
         result.status_counts,
     )
     return result

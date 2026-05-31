@@ -16,7 +16,7 @@ import json
 from datetime import date as Date
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import pandas as pd
 from sqlalchemy import UniqueConstraint
@@ -24,6 +24,9 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Field, Session, SQLModel, col, create_engine, select
 
 from src.core.config import settings
+
+if TYPE_CHECKING:
+    from src.core.portfolio import PaperPortfolio
 
 
 def _utcnow() -> datetime:
@@ -128,6 +131,32 @@ class LayerStrengthRecord(SQLModel, table=True):
     date: Date = Field(primary_key=True)
     layer: str = Field(primary_key=True)
     strength: float = 0.0
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class PortfolioState(SQLModel, table=True):
+    """The current paper-portfolio state (singleton row id=1) — Session 13."""
+
+    __tablename__ = "portfolio"
+
+    id: int = Field(default=1, primary_key=True)
+    cash: float = 0.0
+    positions: str = ""  # JSON: [{ticker, shares, entry}]
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class PortfolioSnapshot(SQLModel, table=True):
+    """A per-day paper-portfolio snapshot for the NAV-vs-VOO history (Session 13)."""
+
+    __tablename__ = "portfolio_history"
+
+    date: Date = Field(primary_key=True)
+    nav: float = 0.0
+    exposure: float = 0.0  # 0-1 invested fraction
+    regime: str = ""  # RISK_ON | NEUTRAL | RISK_OFF
+    weights: str = ""  # JSON {ticker: weight}
+    suggestions: str = ""  # JSON list of rebalance suggestion strings
+    benchmark_value: float = 0.0  # benchmark (VOO) close — normalized for the overlay
     created_at: datetime = Field(default_factory=_utcnow)
 
 
@@ -397,6 +426,22 @@ class Storage:
         with self.session() as s:
             return s.exec(select(RegimeRecord).order_by(col(RegimeRecord.date).desc())).first()
 
+    def recent_regime_labels(self, before: Date, limit: int) -> list[str]:
+        """The ``limit`` most recent regime labels strictly before ``before``.
+
+        Returned oldest → newest so the exposure dial can fold over them. Feeds
+        the Session 13 hysteresis (the current cycle's label is appended by the
+        caller before the prior cycle has been persisted).
+        """
+        with self.session() as s:
+            rows = s.exec(
+                select(RegimeRecord)
+                .where(col(RegimeRecord.date) < before)
+                .order_by(col(RegimeRecord.date).desc())
+                .limit(limit)
+            ).all()
+        return [r.label for r in reversed(rows)]
+
     # --- daily composite scores (Session 11) ------------------------------ #
     def upsert_daily_score(
         self,
@@ -498,3 +543,65 @@ class Storage:
                 s.merge(st)
             s.commit()
         return len(stats)
+
+    # --- paper portfolio (Session 13) ------------------------------------- #
+    def load_portfolio(self) -> "PaperPortfolio":
+        """Return the stored paper portfolio, or a fresh one seeded from config."""
+        from src.core.portfolio import PaperPortfolio
+
+        with self.session() as s:
+            rec = s.get(PortfolioState, 1)
+        if rec is None:
+            return PaperPortfolio.empty()
+        return PaperPortfolio.from_dict(
+            {"cash": rec.cash, "positions": json.loads(rec.positions or "[]")}
+        )
+
+    def save_portfolio(self, portfolio: "PaperPortfolio") -> None:
+        """Persist the current paper-portfolio state (singleton row)."""
+        data = portfolio.to_dict()
+        with self.session() as s:
+            rec = s.get(PortfolioState, 1) or PortfolioState(id=1)
+            rec.cash = float(data["cash"])
+            rec.positions = json.dumps(data["positions"])
+            rec.updated_at = _utcnow()
+            s.merge(rec)
+            s.commit()
+
+    def upsert_portfolio_snapshot(
+        self,
+        *,
+        date: Date,
+        nav: float,
+        exposure: float,
+        regime: str,
+        weights: dict[str, float],
+        suggestions: Sequence[str],
+        benchmark_value: float = 0.0,
+    ) -> PortfolioSnapshot:
+        """Upsert a day's NAV/exposure/holdings snapshot (keyed by date)."""
+        with self.session() as s:
+            rec = s.get(PortfolioSnapshot, date) or PortfolioSnapshot(date=date)
+            rec.nav = nav
+            rec.exposure = exposure
+            rec.regime = regime
+            rec.weights = json.dumps(weights)
+            rec.suggestions = json.dumps(list(suggestions))
+            rec.benchmark_value = benchmark_value
+            rec.created_at = _utcnow()
+            s.merge(rec)
+            s.commit()
+            return rec
+
+    def get_portfolio_history(self) -> list[PortfolioSnapshot]:
+        """All portfolio snapshots, oldest → newest (for the NAV-vs-VOO chart)."""
+        with self.session() as s:
+            return list(
+                s.exec(select(PortfolioSnapshot).order_by(col(PortfolioSnapshot.date))).all()
+            )
+
+    def latest_portfolio_snapshot(self) -> PortfolioSnapshot | None:
+        with self.session() as s:
+            return s.exec(
+                select(PortfolioSnapshot).order_by(col(PortfolioSnapshot.date).desc())
+            ).first()

@@ -164,6 +164,26 @@ def test_layer_rotation_delta_across_two_cycles(store: Storage) -> None:
     assert result.layer_rotation["layer1"] > 0
 
 
+# --- Session 13: portfolio exposure management ----------------------------- #
+def test_cycle_builds_paper_portfolio_and_snapshot(store: Storage) -> None:
+    result = SignalEngine(store).run_cycle(
+        {"NVDA": _breakout_frame(), "VRT": _fresh_entry_zone_frame()}
+    )
+    # Exposure dial set (NEUTRAL with no benchmark data → neutral fraction).
+    from src.core.config import settings
+
+    assert result.exposure == settings.target_exposure_neutral
+    # NAV is conserved on a costless first rebalance from the paper start balance.
+    assert result.portfolio_nav == pytest.approx(settings.paper_start_balance)
+    # A snapshot is persisted for the NAV-vs-VOO history.
+    snap = store.latest_portfolio_snapshot()
+    assert snap is not None
+    assert snap.exposure == settings.target_exposure_neutral
+    assert snap.date == result.bar_date
+    # Rebalance suggestions are exposed as a list (paper-only; never executed).
+    assert isinstance(result.rebalance_suggestions, list)
+
+
 def test_dispatch_routes_to_notifiers() -> None:
     sent: list[Alert] = []
 

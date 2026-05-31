@@ -24,6 +24,7 @@ from loguru import logger
 from src.core import (
     accumulation as accumulation_mod,
     benchmarks as bm,
+    exposure as exposure_mod,
     gating,
     market,
     multitimeframe as mtf,
@@ -31,6 +32,7 @@ from src.core import (
     regime as regime_mod,
     scorecard,
     scoring,
+    sizing as sizing_mod,
     stage as stage_mod,
 )
 from src.core.accumulation import AccumulationResult
@@ -41,8 +43,11 @@ from src.core.ranking import RankedOpportunity, ScoredName
 from src.core.stage import StageResult
 from src.core.config import settings
 from src.core.dossier import Dossier, DossierContext, build_dossier
+from src.core.exposure import ExposureResult
+from src.core.portfolio import PaperPortfolio
 from src.core.regime import Regime
 from src.core.scorecard import ScoreContext
+from src.core.sizing import Candidate, SizingPlan
 from src.core.storage import Storage
 from src.core.strategies.ath_pullback import ATHPullbackStrategy
 from src.core.strategies.base import NO_SIGNAL, Signal, Strategy
@@ -125,6 +130,12 @@ class CycleResult:
     layer_strength: dict[str, float] = field(default_factory=dict)
     layer_rotation: dict[str, float] = field(default_factory=dict)
     thesis: ThesisHealth | None = None
+    # Session 13: paper-portfolio exposure management.
+    exposure: float = 0.0  # 0-1 target invested fraction
+    exposure_result: ExposureResult | None = None
+    portfolio_nav: float = 0.0
+    portfolio_weights: dict[str, float] = field(default_factory=dict)  # ticker -> current weight
+    rebalance_suggestions: list[str] = field(default_factory=list)
 
 
 def _stars(n: int) -> str:
@@ -280,12 +291,15 @@ class SignalEngine:
         historical_provider: Callable[[str, str, str], HistoricalStat | None] | None = None,
         earnings_beat_provider: Callable[[str], str | None] | None = None,
         news_provider: Callable[[str], list[dict[str, Any]]] | None = None,
+        benchmark_price_provider: Callable[[], float | None] | None = None,
         enable_scorecard: bool | None = None,
     ) -> None:
         self.store = store
         self.strategies: list[Strategy] = [cls() for cls in (strategies or DEFAULT_STRATEGIES)]
         self._watchlist = watchlist
         self.benchmark_provider = benchmark_provider or (lambda: {})
+        # Session 13: latest benchmark (VOO) close for the NAV overlay (offline in tests).
+        self.benchmark_price_provider = benchmark_price_provider or (lambda: None)
         self.earnings_provider = earnings_provider or (lambda _t: None)
         # Session 8 evidence providers (default no-ops keep the engine offline in tests).
         self.historical_provider = historical_provider or (lambda _t, _s, _st: None)
@@ -421,6 +435,12 @@ class SignalEngine:
         result.layer_strength, result.layer_rotation, result.thesis = self._layers_and_thesis(
             all_signals, price_map, result.bar_date
         )
+
+        # --- paper-portfolio exposure management (Session 13) ---
+        if settings.enable_portfolio and result.bar_date is not None:
+            self._portfolio_step(
+                result, ranked, cards_by_ticker, df_by_ticker, price_map, regime, result.bar_date
+            )
 
         # --- finalize alerts, folding in "why NOT buy" + composite score/rank ---
         for p in pending:
@@ -573,6 +593,85 @@ class SignalEngine:
             above_50[leader] = None if m is None else m.above_50_ema
         thesis = market.thesis_health(above_50)
         return strength, rotation, thesis
+
+    def _portfolio_step(
+        self,
+        result: CycleResult,
+        ranked: list[RankedOpportunity],
+        cards_by_ticker: dict[str, list[tuple[Signal, scorecard.Scorecard]]],
+        df_by_ticker: dict[str, pd.DataFrame],
+        price_map: dict[str, pd.DataFrame],
+        regime: Regime,
+        bar_date: Date,
+    ) -> None:
+        """Resolve the exposure dial, size a paper book, and record a snapshot.
+
+        Paper-only: target weights and the diff are *suggestions*, never executed.
+        The book is re-applied on the configured rebalance cadence; a NAV/VOO
+        snapshot is recorded every cycle for the dashboard's index comparison.
+        """
+        # Exposure dial from the regime history (prior labels + today's), with hysteresis.
+        history = self.store.recent_regime_labels(bar_date, settings.regime_confirm_days + 10)
+        exp = exposure_mod.target_exposure([*history, regime.label])
+        result.exposure = exp.exposure
+        result.exposure_result = exp
+
+        # Build sizing candidates from the cross-sectional ranking + grades.
+        rank_by_ticker = {r.ticker: r for r in ranked}
+        candidates: list[Candidate] = []
+        for ticker, ro in rank_by_ticker.items():
+            cards = cards_by_ticker.get(ticker)
+            if not cards:
+                continue
+            best_sig, best_card = max(
+                cards, key=lambda sc: (_ACTION_RANK.get(sc[1].action, -1), sc[1].score)
+            )
+            dq = gating.disqualifiers(best_sig, best_card, regime)
+            m = _safe_call(compute_metrics, df_by_ticker[ticker], label="pf_metrics", default=None)
+            above_50 = True if m is None or m.above_50_ema is None else m.above_50_ema
+            candidates.append(
+                Candidate(
+                    ticker=ticker,
+                    score=ro.score,
+                    rank=ro.rank,
+                    grade=best_card.action,
+                    disqualified=bool(dq),
+                    above_50_ema=above_50,
+                )
+            )
+
+        prices = {t: float(df["close"].iloc[-1]) for t, df in price_map.items() if not df.empty}
+        portfolio = self.store.load_portfolio()
+        held = portfolio.current_weights(prices)
+        plan: SizingPlan = sizing_mod.target_weights(candidates, exp.exposure, held)
+        result.rebalance_suggestions = [a.summary() for a in plan.actions]
+
+        # Re-apply the paper book only on the configured cadence (turnover discipline).
+        if self._rebalance_due(bar_date):
+            portfolio.apply_targets(plan.target_weights, prices)
+            self.store.save_portfolio(portfolio)
+
+        nav = portfolio.nav(prices)
+        result.portfolio_nav = nav
+        result.portfolio_weights = portfolio.current_weights(prices)
+        bench = _safe_call(self.benchmark_price_provider, label="benchmark_price", default=None)
+        self.store.upsert_portfolio_snapshot(
+            date=bar_date,
+            nav=nav,
+            exposure=exp.exposure,
+            regime=regime.label,
+            weights=result.portfolio_weights,
+            suggestions=result.rebalance_suggestions,
+            benchmark_value=float(bench) if bench is not None else 0.0,
+        )
+
+    def _rebalance_due(self, bar_date: Date) -> bool:
+        """True when enough calendar time has elapsed since the last snapshot."""
+        spacing = {"daily": 1, "weekly": 7, "monthly": 28}.get(settings.rebalance_cadence, 7)
+        last = self.store.latest_portfolio_snapshot()
+        if last is None:
+            return True
+        return (bar_date - last.date).days >= spacing
 
     def _gate(
         self,

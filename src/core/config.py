@@ -163,6 +163,28 @@ class Settings(BaseSettings):
         default_factory=lambda: ["NVDA", "AVGO", "VRT", "ANET", "MSFT", "MU"]
     )
 
+    # --- Session 13: portfolio exposure management (paper-only) ---
+    paper_start_balance: float = 5000.0
+    # Regime → total invested fraction (0.0-1.0). The cash option the index lacks.
+    target_exposure_on: float = 1.0
+    target_exposure_neutral: float = 0.6
+    target_exposure_off: float = 0.3
+    # Hysteresis: a regime must persist this many trading days before the dial moves
+    # (mandatory whipsaw guard — a one-day flip does NOT change exposure).
+    regime_confirm_days: int = 3
+    # Conviction sizing + concentration.
+    max_positions: int = 6  # top-N by composite score that get weighted
+    max_position_pct: float = 0.25  # concentration cap — no single name above this
+    min_position_pct: float = 0.05  # weight floor — drop dust positions below this
+    # Relative-strength rotation.
+    exit_rank: int = 10  # a held name falling past this rank is cut
+    min_grade: str = "DECENT"  # minimum scorecard action to enter a new name
+    # Turnover / cost discipline.
+    rebalance_cadence: str = "weekly"  # recompute targets on a schedule, not daily
+    rebalance_threshold_pct: float = 0.03  # no-trade band — ignore drifts smaller than this
+    portfolio_benchmark: str = "VOO"  # NAV is always benchmarked against the index
+    enable_portfolio: bool = True
+
     # --- alerts ---
     min_confidence_stars: int = 1
     alert_desktop: bool = True

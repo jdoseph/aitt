@@ -13,7 +13,8 @@ from abc import ABC, abstractmethod
 from loguru import logger
 
 from src.core.config import Settings, settings
-from src.core.signals import Alert
+from src.core.regime import RISK_OFF, RISK_ON
+from src.core.signals import Alert, CycleResult
 
 _SEVERITY_PREFIX = {"entry": "🟢 ENTRY", "secondary": "🟡 DIP", "warning": "🔴 WARNING"}
 
@@ -105,3 +106,39 @@ def dispatch(alerts: list[Alert], notifiers: list[Notifier] | None = None) -> in
         for n in notifiers:
             n.send(alert)
     return len(alerts)
+
+
+_DIAL = {RISK_ON: "🟢", RISK_OFF: "🔴"}
+
+
+def portfolio_summary_lines(result: CycleResult) -> list[str]:
+    """Human-readable paper-portfolio summary: exposure dial, NAV, holdings, suggestions."""
+    dial = _DIAL.get(result.regime_label, "🟡")
+    lines = [
+        f"{dial} Paper portfolio — {result.exposure * 100:.0f}% invested "
+        f"({result.regime_label}) · NAV ${result.portfolio_nav:,.0f}"
+    ]
+    exp = result.exposure_result
+    if exp is not None and exp.pending is not None:
+        lines.append(
+            f"  ⏳ {exp.pending} building ({exp.days_pending}/{settings.regime_confirm_days}d) "
+            "— dial unchanged until confirmed"
+        )
+    if result.portfolio_weights:
+        holdings = ", ".join(
+            f"{t} {w * 100:.0f}%"
+            for t, w in sorted(result.portfolio_weights.items(), key=lambda kv: -kv[1])
+        )
+        lines.append(f"  Holdings: {holdings}")
+    if result.rebalance_suggestions:
+        lines.append("  Rebalance suggestions (paper — not executed):")
+        lines.extend(f"    • {s}" for s in result.rebalance_suggestions)
+    return lines
+
+
+def log_portfolio_summary(result: CycleResult) -> None:
+    """Emit the portfolio summary via the console logger."""
+    if not settings.enable_portfolio:
+        return
+    for line in portfolio_summary_lines(result):
+        logger.info(line)
