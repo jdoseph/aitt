@@ -22,7 +22,7 @@ The watchlist and value chain understanding is informed by:
 
 ## Working with this spec
 
-**This project is built across 14 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
+**This project is built across 15 sequential sessions** defined in the "Implementation sessions" section. Each session is scoped and self-contained. At the start of each session:
 
 1. **Re-read this CLAUDE.md** — it may have been updated since the last session
 2. **Check the Open questions section** — resolve any 🔴 items before writing code if not yet answered
@@ -96,17 +96,20 @@ ai-infra-tracker/
 │   │   ├── exposure.py         # Regime → total-exposure dial + hysteresis (S13)
 │   │   ├── sizing.py           # Conviction sizing + RS rotation + concentration caps (S13)
 │   │   ├── backtest_portfolio.py  # Walk-forward portfolio backtest vs VOO (S14)
+│   │   ├── execution.py        # Price simulation: next-open entry, slippage, intraday exits (S15)
+│   │   ├── paper_trades.py     # Trade lifecycle: PENDING→OPEN→CLOSED, journal, P&L (S15)
 │   │   └── storage.py          # SQLite ORM (SQLModel)
 │   ├── agent/
-│   │   ├── scheduler.py        # APScheduler entry point
-│   │   ├── jobs.py             # Refresh prices, evaluate signals, fire alerts
-│   │   └── notify.py           # Desktop notifications, future webhook hooks
+│   │   ├── scheduler.py        # APScheduler: daily-close + intraday 5-min monitor (updated S15)
+│   │   ├── jobs.py             # execute_pending(), monitor_positions(), daily_eval() (updated S15)
+│   │   └── notify.py           # Desktop alerts: trade opened/closed + daily P&L summary
 │   └── dashboard/
 │       ├── app.py              # Streamlit entry point
 │       ├── pages/
 │       │   ├── overview.py     # Watchlist table with status per ticker, multi-strategy
 │       │   ├── chart.py        # Per-ticker chart with EMAs, ATH, consolidation ranges
 │       │   ├── value_chain.py  # Group by layer, show signal density per layer
+│       │   ├── trades.py       # Open positions, trade journal, decision snapshots, win stats (S15)
 │       │   └── alerts.py       # Alert history + acknowledged state, filterable
 │       └── components/         # Reusable Streamlit pieces
 └── tests/
@@ -128,9 +131,9 @@ ai-infra-tracker/
 
 ## Implementation sessions
 
-Build this project across **14 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
+Build this project across **15 sequential sessions**. Each session is self-contained — complete it fully, verify it works, then move to the next. Do not skip ahead. At the start of each session, **re-read this CLAUDE.md** and check if any open questions were resolved since last session.
 
-> **Status:** **All 14 sessions are complete** (on `main`). Session 13 (portfolio exposure management — paper-only): `exposure.py` (regime→exposure dial with 3-day hysteresis), `sizing.py` (conviction weights + concentration caps + RS rotation + no-trade band), `portfolio.py` (`PaperPortfolio`), portfolio storage tables, orchestrator wiring, portfolio summary alert, **Portfolio** dashboard page. Session 14 (walk-forward backtest vs VOO): `backtest_portfolio.py` (no-lookahead replay of the full mechanism + perf metrics — total return / CAGR / max drawdown / Sharpe / Sortino / vol, turnover costs, regime-conditional breakdown), `jobs.run_portfolio_backtest`, and the **Backtest** dashboard page with a Sharpe-arbitrated verdict. **The honest caveat stands: no conclusion about beating VOO is valid until the backtest is run on real history through a real drawdown** — the tool is built, the verdict is data-dependent. Only the **v2 portfolio-aware track** (real-holdings exits, trade journal, Bayesian win-prob) remains, and it's deferred. **Session 12 was built before 11** (its deeper-signal outputs — accumulation, weekly trend, Weinstein stage, ATR/crowding, capex_exposure — are inputs the Session 11 composite score consumes). Sessions 11–12 build on the scorecard (7), evidence (8), dossier (9), and regime gate (10). A slimmed **v2 portfolio-aware track** (real-holdings exits, trade journal, Bayesian win-prob) is described after Session 14.
+> **Status:** **Sessions 1–14 are complete** (on `main`). Session 13 (portfolio exposure management — paper-only): `exposure.py` (regime→exposure dial with 3-day hysteresis), `sizing.py` (conviction weights + concentration caps + RS rotation + no-trade band), `portfolio.py` (`PaperPortfolio`), portfolio storage tables, orchestrator wiring, portfolio summary alert, **Portfolio** dashboard page. Session 14 (walk-forward backtest vs VOO): `backtest_portfolio.py` (no-lookahead replay of the full mechanism + perf metrics — total return / CAGR / max drawdown / Sharpe / Sortino / vol, turnover costs, regime-conditional breakdown), `jobs.run_portfolio_backtest`, and the **Backtest** dashboard page with a Sharpe-arbitrated verdict. **Remaining: 15** (autonomous paper trading engine) — the agent opens/monitors/closes simulated trades on its own during market hours; not built yet. **The honest caveat stands: no conclusion about beating VOO is valid until the backtest is run on real history through a real drawdown** — the tool is built, the verdict is data-dependent. After Session 15, only the **v2 portfolio-aware track** (real-holdings exits, trade journal, Bayesian win-prob / the deferred learning loop) remains. **Session 12 was built before 11** (its deeper-signal outputs — accumulation, weekly trend, Weinstein stage, ATR/crowding, capex_exposure — are inputs the Session 11 composite score consumes). Sessions 11–12 build on the scorecard (7), evidence (8), dossier (9), and regime gate (10). A slimmed **v2 portfolio-aware track** (real-holdings exits, trade journal, Bayesian win-prob) is described after Session 14.
 >
 > **Note (Session 10 config):** the canonical RISK_ON/OFF gate uses `regime_gate_ema_span` (50). Session 9's *informational* 21-EMA line keeps `regime_ema_span` (21) — the two are intentionally separate knobs (the spec's "`regime_ema_span` (50)" for Session 10 was renamed to avoid clobbering Session 9's).
 >
@@ -205,6 +208,7 @@ Build this project across **14 sequential sessions**. Each session is self-conta
 **Build:**
 - `src/core/signals.py` — orchestrator: for each ticker, run all 4 strategies, attach bullish pattern confidence scores to each signal, collect signals, deduplicate by `(ticker, strategy, status, date)`, write to SQLite, detect status transitions (previous vs. current), return list of new alerts to fire sorted by confidence (⭐⭐⭐ first)
 - `src/agent/scheduler.py` — APScheduler entry point: **daily-close cadence (resolved)** — one evaluation cycle shortly after US market close (~4:15 PM ET) on trading weekdays. No 30-min intraday loop.
+  > **Session 15 updates the scheduler** to add two new jobs: a market-open execution job (9:31 AM ET, fills PENDING paper trades) and an intraday monitoring job (every 5 min, 9:35–3:55 PM ET, watches open positions for stop/target hits). The daily-close evaluation job is unchanged.
 - `src/agent/jobs.py` — `refresh_prices()`: batch fetch all tickers; `evaluate_signals()`: run orchestrator; `fire_alerts()`: dispatch to notification layer
 - `src/agent/notify.py` — desktop notifications via `plyer`, console logging. ⭐⭐⭐ alerts get higher priority (persistent notification vs. transient). Structured so email/webhook can be plugged in later without changing the interface
 - CLI: `python -m src.agent` (background daemon) and `python -m src.agent --once` (single eval cycle for testing)
@@ -561,6 +565,156 @@ through at least one real drawdown.
   A smoother ride at a lower return is a legitimate outcome; a higher return with far deeper
   drawdowns is not a win. Let the numbers decide, not the narrative.
 - `pytest tests/ -v` and `mypy --strict` green.
+
+---
+
+### Session 15 — Autonomous Paper Trading Engine
+
+**Goal:** The agent runs itself. During market hours it monitors open positions every 5 minutes
+for stop/target hits. After market close it evaluates signals and queues entries for the next
+morning's open. No human confirmation is needed — the full decision pipeline (strategy → scorecard
+→ gating → composite → sizing → exposure) executes autonomously against a fake-money budget. Every
+action is recorded with a complete snapshot of the agent's state at decision time.
+
+> **What this is:** The agent detects setups, opens positions, monitors stops and targets intraday,
+> rotates out of laggards, and closes trades — completely on its own. Every decision is logged with
+> a full snapshot of WHY it acted. The user sets a budget; the agent stays within it. All fake
+> money, never connected to a real broker.
+>
+> **What changed from the prior design:** the scheduler is no longer daily-close-only — it adds an
+> intraday monitoring loop every 5 min during market hours for stop/target surveillance on open
+> positions. Signal *generation* still happens at daily close (no change to strategies). "Max
+> positions" is replaced by a pure budget constraint (subject to min/max size per trade). The
+> learning loop (trade autopsy via Claude API) is deferred.
+
+---
+
+**Trade lifecycle (four states):**
+
+```
+PENDING → OPEN → CLOSED
+             ↑
+         (intraday monitor fires a stop or target)
+```
+
+1. **PENDING** — created at daily-close evaluation when a signal passes all gates and budget allows
+   an entry. Stores the full decision snapshot (signals, scorecard, dossier, composite, regime,
+   target weights) at the moment of queuing. Waits for next morning's open.
+2. **OPEN** — executed at next market open. Price = next-open + slippage. Shares from budget-based
+   sizing. Stop and target levels carried from the dossier.
+3. **CLOSED** — triggered by any exit condition. Price = exit price + slippage. P&L computed. Final
+   snapshot updated with outcome vs the entry thesis.
+
+---
+
+**Entry logic:** at daily-close evaluation, create a PENDING trade when ALL of:
+- Signal has a gradeable setup (not NO_SIGNAL, not disqualified by gating)
+- Composite score ≥ `paper_min_score` (default 55/100)
+- Grade ≥ `paper_min_grade` (default "DECENT")
+- Regime is not RISK_OFF (regime gate still applies)
+- Available cash ≥ `min_position_size` (default $200)
+- Ticker not already OPEN or PENDING in the paper book
+- Position size would not exceed `max_position_pct` × budget (default 25% = $1,250 on a $5,000 budget)
+
+**Position sizing (budget-constrained, not max-positions-constrained):**
+- Base size = composite_score / 100 × `base_position_pct` × available_cash
+- Clamped to [`min_position_size`, `max_position_size`]
+- `max_position_size` = min(`max_position_pct` × budget, available_cash × 0.5)
+- As many concurrent positions as the budget allows subject to these bounds — no hard count cap.
+
+---
+
+**Exit conditions (priority order).** During the intraday monitor (every 5 min, 9:30–4:00 ET):
+1. **Stop hit** — latest price ≤ stop_price → EXIT_STOP at stop_price + slippage
+2. **Target hit** — latest price ≥ target_price → EXIT_TARGET at target_price (−slippage)
+
+At daily-close evaluation:
+3. **50 EMA lost** — close below 50 EMA → queue EXIT_EMA for next open
+4. **Regime to RISK_OFF** — exposure dial drops → queue EXIT_REGIME for next open
+5. **RS rotation** — name drops below rank `exit_rank` (default 12) → queue EXIT_ROTATION
+6. **Time stop** — held > `time_stop_days` (default 30) → queue EXIT_TIME
+7. **Grade drops to AVOID** — queue EXIT_QUALITY for next open
+
+---
+
+**Slippage simulation (honest tradeoffs).** Slippage is estimated, not real — tiered by liquidity:
+
+| Tier | Examples | Entry | Exit |
+|---|---|---|---|
+| Large cap (>$50B) | NVDA, VRT, ETN, TXN | 3 bps | 3 bps |
+| Mid cap ($10–50B) | ANET, AVGO, GEV, MU | 7 bps | 7 bps |
+| Small cap (<$10B) | CRDO, CIEN, GLW | 12 bps | 12 bps |
+| Micro / volatile | RDW, LUNR, ASTS | 20 bps | 25 bps |
+
+- **Gap risk on queued exits:** a stop at $19.50 that gaps to a $17.00 open executes at $17.00 (the
+  open), not $19.50. The model checks gaps on PENDING exits.
+- **Volume-adjusted slippage:** if position_size > 1% of 20-day avg daily volume, add 5 bps extra.
+- **15-minute data delay:** yfinance free data is ~15 min delayed; stop monitoring may be slightly stale.
+
+**Honest limitations (written into the dashboard disclaimer):** slippage is estimated; intraday data
+is ~15 min delayed (real stops would be live); 5-min monitoring can miss/late-catch an intraday wick
+that real exchange GTC stops would catch; paper results overstate real performance (no partial fills,
+no market impact, no psychological friction); tax drag is not simulated.
+
+**Build:**
+- `src/core/execution.py` — `get_open_price(ticker, date)` (first 1-min bar of the session, fallback
+  to prior close); `get_current_price(ticker)` (`fast_info.last_price` or 5-min bar);
+  `slippage_bps(ticker, side, position_size, avg_volume)` (tiered table + volume adjustment);
+  `apply_slippage(price, bps, side)` (buy adds, sell subtracts); `check_gap(ticker, expected_price,
+  date)` (returns the worse of expected vs actual open).
+- `src/core/paper_trades.py` — SQLite tables `paper_trades` (trade_id, ticker, strategy,
+  entry_signal_id, status, entry/exit date+price+slippage, shares, cost_basis, stop_price,
+  target_price, exit_reason, pnl_dollars, pnl_pct, holding_days, signal_snapshot_json) and
+  `portfolio_cashbook` (date, cash_start, cash_end, invested_value, total_nav, voo_nav, regime,
+  exposure_pct). Functions: `create_pending(signal, scorecard, dossier, composite, size)` (snapshots
+  everything immutably into `signal_snapshot_json`), `execute_pending(trade_id, open_price)`
+  (PENDING→OPEN), `close_trade(trade_id, exit_price, exit_reason)` (OPEN→CLOSED + P&L),
+  `available_cash()` (budget − open cost bases), `current_nav()` (cash + open MV),
+  `voo_nav_since_start()` (same-dollar VOO benchmark from the start date).
+- `src/agent/scheduler.py` (UPDATE) — keep the daily-close job; ADD an intraday monitor job (every
+  `monitor_interval_minutes`, default 5, 9:35–3:55 ET on trading weekdays → `monitor_positions()`)
+  and a market-open job (9:31 ET → `execute_pending()`). Skip market holidays
+  (`pandas_market_calendars` or a config holiday list); never hammer yfinance on non-trading days.
+- `src/agent/jobs.py` (UPDATE) — `execute_pending()` (fill PENDING at open + slippage, gap-check,
+  →OPEN, update cashbook, notify "📈 OPENED…"); `monitor_positions()` (check stop/target on OPEN
+  trades, close + slippage, notify "🛑 STOP HIT…" / "🎯 TARGET HIT…"); `daily_eval()` (UPDATE — after
+  building new PENDING entries, evaluate open positions for daily exit conditions and queue EXIT
+  closures for next open); `daily_summary()` (4:30 PM — one notification: NAV, vs VOO, open count,
+  today's closed P&L).
+- `src/agent/notify.py` (UPDATE) — three concise one-line formats: trade opened, trade closed (P&L +
+  exit reason), daily summary.
+- `src/dashboard/pages/trades.py` — portfolio strip (budget, NAV, P&L $/%, VOO same-period, alpha,
+  regime badge, exposure %); open-positions table (entry, current, unrealized P&L, dist-to-stop/target,
+  days held, entry score+grade); closed-trades table (color-coded by outcome); trade-detail drawer
+  (frozen scorecard, dossier bull/bear, regime, composite, slippage breakdown, outcome vs expected);
+  win-rate breakdown by strategy/grade/regime/layer/exit-reason (needs ≥10 closed trades, else
+  "collecting data"); equity curve (paper NAV vs VOO since start); an always-visible disclaimer banner.
+- `config.py` — `paper_budget` (5000.0), `paper_min_score` (55), `paper_min_grade` ("DECENT"),
+  `min_position_size` (200.0), `max_position_pct` (0.25), `base_position_pct`,
+  `monitor_interval_minutes` (5), `time_stop_days` (30), `exit_rank` (12), `slippage_tiers` (by mkt
+  cap), `volume_slippage_pct` (0.01).
+- Tests: `test_execution.py` (slippage tiers, gap check, volume adjustment), `test_paper_trades.py`
+  (PENDING→OPEN→CLOSED state machine, P&L math, cashbook balance, gap protection), `test_monitor.py`
+  (stop hit + target hit on synthetic intraday bars, 5-min interval).
+
+**Verify before moving on:**
+- At 9:31 AM the execute_pending job fills PENDING trades at the correct open price + slippage,
+  notifies, and updates `available_cash` correctly.
+- The intraday monitor detects a stop hit on synthetic 5-min data and closes at the stop price (not
+  the next-bar open).
+- Gap protection: a PENDING exit with stop $19.50 but next-day open $17.00 closes at $17.00, gap
+  documented in the trade record.
+- Volume-adjusted slippage: a position >1% of a ticker's ADV gets extra bps.
+- `available_cash()` reflects open cost bases; the budget is never exceeded.
+- Trades page shows open positions with live unrealized P&L, closed trades with full decision
+  snapshots, the win-rate breakdown (after 10+ trades), and the NAV-vs-VOO equity curve.
+- Daily summary notification fires at 4:30 PM with accurate NAV and today's activity.
+- No trades open on weekends or market holidays.
+- `pytest tests/ -v` and `mypy --strict` green.
+
+**Deferred to a later session (the learning loop):** post-trade autopsy via Claude API (entry
+snapshot + outcome → natural-language analysis); adaptive threshold adjustment from accumulated
+outcomes; win-rate feedback into Session 8's historical data; trade-journal export (CSV/PDF).
 
 ---
 
@@ -990,6 +1144,14 @@ Tagged by priority. **Resolve 🔴 before writing code.** Update this section as
 28. **Concentration vs. smoothness.** `max_positions` 6 and `max_position_pct` 25% is aggressive. More positions / lower caps = smoother, closer to the index. Tune against the Session 14 Sharpe.
 29. **Rebalance cadence.** Weekly default. Daily churns/costs more; monthly is calmer but slower to cut losers. Let the backtest's turnover/cost drag decide.
 
+*(Session 15 — autonomous paper trading — questions, numbered 30–34.)*
+
+30. **Paper budget amount.** What $ amount to start the paper account with? Suggested $5,000 to mirror the mock experiment. Changeable in config anytime without resetting trade history.
+31. **Minimum grade for paper entries.** Default "DECENT" — only HIGH-QUALITY and DECENT setups open positions. Should MARGINAL setups ever open a starter position?
+32. **Stop type.** The dossier suggests a stop by setup type (below 21 EMA / range low / swing low). Should the paper engine always use the dossier stop, or add a hard maximum stop (e.g., never more than 8% below entry)?
+33. **Intraday data delay.** yfinance free tier has ~15 min delay. Accept for paper trading, or pay for a real-time feed? Default: accept and document it.
+34. **Notification volume.** With 5+ open positions, the intraday monitor can fire many notifications. Throttle to only "material" events (stop hit, target hit, daily summary)?
+
 ### 🟢 Nice-to-have (defer to v2 unless requested)
 
 17. **Trade journal.** Let user mark "I bought this alert at $X" and track outcomes. → **Part of the deferred v2 portfolio-aware track** (needs a holdings input; see after Session 12).
@@ -1027,3 +1189,11 @@ These were chosen as defaults to make the spec concrete. Flag any you want chang
 - Regime dial uses 3-day hysteresis to avoid whipsaw (mandatory guard)
 - Top 6 names, 25% max single position, weekly rebalance, 3% no-trade band, 30% RISK_OFF floor
 - No conclusion about beating VOO is valid until the Session 14 walk-forward backtest (net of costs, through a real drawdown). Build 13, then 14, before trusting a dollar
+- Paper trading (Session 15) is fully autonomous — the agent opens and closes positions without user confirmation
+- Computer runs during US market hours (9:30 AM – 4:00 PM ET weekdays) for intraday monitoring
+- Signal generation: daily close only (unchanged). Entries: next-day open. Exits: intraday or next-day open depending on exit type
+- Budget-constrained, not position-count constrained (as many positions as budget allows)
+- Slippage: tiered by market cap + volume adjustment (see execution.py spec)
+- ~15 min data delay on the intraday monitor accepted (yfinance free tier)
+- Learning loop (trade autopsy, adaptive thresholds) deferred to a future session
+- All paper P&L benchmarked against VOO from the same start date — every view shows alpha

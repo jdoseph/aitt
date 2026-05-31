@@ -91,4 +91,5 @@ uv run mypy src           # strict type check
 - [x] **Session 12** — deeper signals: accumulation (OBV/A-D), weekly trend alignment, Weinstein stage, ATR crowding, AI-capex exposure
 - [x] **Session 13** — portfolio exposure management (paper): regime exposure dial + 3-day hysteresis, conviction sizing + concentration caps, RS rotation, Portfolio dashboard page (NAV vs VOO)
 - [x] **Session 14** — walk-forward backtest vs VOO: no-lookahead replay + risk metrics (return/CAGR/drawdown/Sharpe/Sortino), turnover costs, regime breakdown, Backtest dashboard page
+- [ ] Session 15 — autonomous paper trading engine: intraday monitor (stop/target), next-open execution, budget-constrained sizing, trade journal + decision snapshots, Trades dashboard page
 - [ ] v2 (deferred) — portfolio-aware: holdings input → exits, concentration, opportunity-cost-vs-holdings, Bayesian probability
