@@ -7,20 +7,45 @@ skipped, never aborting the cycle.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date as Date
+from datetime import datetime
+from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from loguru import logger
 
 from src.agent import notify
-from src.core import backtest, backtest_portfolio, benchmarks, earnings, news
+from src.core import backtest, backtest_portfolio, benchmarks, earnings, execution, news
 from src.core.backtest_portfolio import BacktestResult
 from src.core.config import settings
 from src.core.data import DataFetchError, fetch_many, fetch_prices
+from src.core.execution import BUY, SELL, Side, check_gap, slippage_bps
+from src.core.paper_trades import PaperBook
 from src.core.signals import CycleResult, SignalEngine
-from src.core.storage import Storage
+from src.core.storage import PaperTrade, Storage
 from src.core.watchlist import load_watchlist
+
+# A daily exit's priority order (lower index = higher priority).
+_DAILY_EXIT_PRIORITY = ["EXIT_EMA", "EXIT_REGIME", "EXIT_ROTATION", "EXIT_TIME", "EXIT_QUALITY"]
+_GRADE_ORDER = ["AVOID", "MARGINAL", "DECENT", "HIGH-QUALITY"]
+
+# Default slippage estimator: liquidity tier only (no live market-cap / ADV here).
+SlippageFn = Callable[[str, Side, float], float]
+
+
+def _default_slippage(ticker: str, side: Side, position_dollars: float) -> float:
+    return slippage_bps(ticker, side)
+
+
+def _grade_ok(grade: str, minimum: str) -> bool:
+    try:
+        return _GRADE_ORDER.index(grade) >= _GRADE_ORDER.index(minimum)
+    except ValueError:
+        return False
 
 
 def refresh_prices(store: Storage, tickers: list[str] | None = None) -> dict[str, pd.DataFrame]:
@@ -179,3 +204,389 @@ def run_once(store: Storage | None = None, *, fetch: bool = True) -> CycleResult
         result.status_counts,
     )
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Session 15 — autonomous paper trading engine
+# --------------------------------------------------------------------------- #
+def monitor_positions(
+    book: PaperBook,
+    *,
+    price_provider: Callable[[str], float | None],
+    on: Date,
+    slippage_fn: SlippageFn = _default_slippage,
+    notify_events: bool = False,
+) -> list[PaperTrade]:
+    """Intraday stop/target surveillance on OPEN positions (every ~5 min).
+
+    A stop hit closes at the *stop level* (not the next-bar open); a target hit
+    closes at the *target level*. Stop takes priority. A position already flagged
+    for a queued daily exit is left for the market-open job. Returns trades closed.
+    """
+    closed: list[PaperTrade] = []
+    for t in book.open_trades():
+        if t.pending_exit_reason:
+            continue  # already queued to close at the next open
+        price = price_provider(t.ticker)
+        if price is None:
+            continue
+        if t.stop_price and price <= t.stop_price:
+            done = book.close_trade(
+                t, exit_price=t.stop_price, exit_reason="EXIT_STOP",
+                slippage_bps=slippage_fn(t.ticker, SELL, t.shares * t.stop_price), on=on,
+            )
+            closed.append(done)
+        elif t.target_price and price >= t.target_price:
+            done = book.close_trade(
+                t, exit_price=t.target_price, exit_reason="EXIT_TARGET",
+                slippage_bps=slippage_fn(t.ticker, SELL, t.shares * t.target_price), on=on,
+            )
+            closed.append(done)
+    if notify_events:
+        for t in closed:
+            notify.notify_trade_closed(t)
+    return closed
+
+
+def execute_market_open(
+    book: PaperBook,
+    *,
+    on: Date,
+    open_price_provider: Callable[[str, Date], float | None],
+    slippage_fn: SlippageFn = _default_slippage,
+    notify_events: bool = False,
+) -> tuple[list[PaperTrade], list[PaperTrade]]:
+    """The 9:31 fill job: process overnight gaps + queued exits, then fill entries.
+
+    Order matters — exits free up cash before new entries are filled:
+      1. OPEN trades with a queued daily exit close at the open.
+      2. OPEN trades that gapped through a stop/target overnight close at the open
+         (gap-protected: a stop at $19.50 gapping to a $17.00 open fills at $17.00).
+      3. PENDING entries fill at the open + slippage (PENDING → OPEN).
+    Returns ``(opened, closed)``.
+    """
+    closed: list[PaperTrade] = []
+    for t in book.open_trades():
+        op = open_price_provider(t.ticker, on)
+        if op is None:
+            continue
+        reason, gap_note, fill = "", "", op
+        if t.pending_exit_reason:
+            reason = t.pending_exit_reason
+        elif t.stop_price and op <= t.stop_price:
+            reason = "EXIT_STOP"
+            fill = check_gap(t.stop_price, op, SELL)
+            if op < t.stop_price:
+                gap_note = f"gapped through stop {t.stop_price:.2f} -> filled at open {op:.2f}"
+        elif t.target_price and op >= t.target_price:
+            reason = "EXIT_TARGET"
+            fill = max(t.target_price, op)  # favorable gap fills at the better open
+            if op > t.target_price:
+                gap_note = f"gapped above target {t.target_price:.2f} -> filled at open {op:.2f}"
+        if reason:
+            done = book.close_trade(
+                t, exit_price=fill, exit_reason=reason,
+                slippage_bps=slippage_fn(t.ticker, SELL, t.shares * fill), on=on,
+                gap_note=gap_note,
+            )
+            closed.append(done)
+
+    opened: list[PaperTrade] = []
+    for t in book.pending_trades():
+        op = open_price_provider(t.ticker, on)
+        if op is None:
+            continue
+        done = book.execute_pending(
+            t, open_price=op, slippage_bps=slippage_fn(t.ticker, BUY, t.cost_basis), on=on
+        )
+        opened.append(done)
+
+    if notify_events:
+        for t in closed:
+            notify.notify_trade_closed(t)
+        for t in opened:
+            notify.notify_trade_opened(t)
+    return opened, closed
+
+
+def queue_entries(
+    book: PaperBook,
+    store: Storage,
+    *,
+    on: Date,
+    regime_label: str,
+) -> list[PaperTrade]:
+    """Create PENDING entries from the day's graded candidates (best rank first).
+
+    A name enters only when every gate passes: regime is not RISK_OFF, composite
+    ≥ ``paper_min_score``, grade ≥ ``paper_min_grade``, it isn't already active,
+    and the budget can fund at least ``min_position_size``. The full decision
+    state is snapshotted into the trade immutably.
+    """
+    if regime_label == "RISK_OFF":
+        return []
+    created: list[PaperTrade] = []
+    for ds in store.get_daily_scores(on):  # best rank first
+        if ds.score < settings.paper_min_score:
+            continue
+        if book.has_active(ds.ticker):
+            continue
+        dossier = store.latest_dossier(ds.ticker)
+        if dossier is None or dossier.date != on or not _grade_ok(dossier.grade, settings.paper_min_grade):
+            continue
+        plan = json.loads(dossier.summary or "{}").get("trade_plan", {})
+        stop = float(plan.get("stop") or 0.0)
+        target = float(plan.get("target") or 0.0)
+        planned = book.size_position(ds.score)
+        if planned <= 0:
+            continue  # out of budget — stop trying to add more names
+        created.append(
+            book.create_pending(
+                ticker=ds.ticker,
+                strategy="composite",
+                signal_id=None,
+                snapshot={
+                    "composite": ds.score,
+                    "rank": ds.rank,
+                    "grade": dossier.grade,
+                    "regime": regime_label,
+                    "dossier": json.loads(dossier.summary or "{}"),
+                },
+                planned_dollars=planned,
+                stop_price=stop,
+                target_price=target,
+            )
+        )
+    return created
+
+
+def queue_daily_exits(
+    book: PaperBook,
+    store: Storage,
+    *,
+    on: Date,
+    regime_label: str,
+    price_map: dict[str, pd.DataFrame] | None = None,
+) -> list[PaperTrade]:
+    """Flag OPEN positions for a next-open exit on any daily exit condition.
+
+    Priority: 50-EMA loss → RISK_OFF → RS rotation (past ``paper_exit_rank``) →
+    time stop → grade dropped to AVOID. Sets ``pending_exit_reason``; the actual
+    close happens at the next market open.
+    """
+    flagged: list[PaperTrade] = []
+    rank_of = {ds.ticker: ds.rank for ds in store.get_daily_scores(on)}
+    for t in book.open_trades():
+        if t.pending_exit_reason:
+            continue
+        reason = _daily_exit_reason(t, store, on=on, regime_label=regime_label, rank_of=rank_of, price_map=price_map)
+        if reason:
+            t.pending_exit_reason = reason
+            store.update_paper_trade(t)
+            flagged.append(t)
+    return flagged
+
+
+def _daily_exit_reason(
+    t: PaperTrade,
+    store: Storage,
+    *,
+    on: Date,
+    regime_label: str,
+    rank_of: dict[str, int],
+    price_map: dict[str, pd.DataFrame] | None,
+) -> str:
+    # 50-EMA loss
+    df = (price_map or {}).get(t.ticker)
+    if df is None:
+        df = store.get_prices(t.ticker)
+    if df is not None and not df.empty and len(df) >= 50:
+        ema50 = float(df["close"].ewm(span=50, adjust=False).mean().iloc[-1])
+        if float(df["close"].iloc[-1]) < ema50:
+            return "EXIT_EMA"
+    # regime
+    if regime_label == "RISK_OFF":
+        return "EXIT_REGIME"
+    # RS rotation
+    rank = rank_of.get(t.ticker)
+    if rank is not None and rank > settings.paper_exit_rank:
+        return "EXIT_ROTATION"
+    # time stop
+    if t.entry_date is not None and (on - t.entry_date).days > settings.time_stop_days:
+        return "EXIT_TIME"
+    # grade to AVOID
+    dossier = store.latest_dossier(t.ticker)
+    if dossier is not None and dossier.date == on and dossier.grade == "AVOID":
+        return "EXIT_QUALITY"
+    return ""
+
+
+def daily_eval(store: Storage | None = None, *, fetch: bool = True) -> CycleResult:
+    """The daily-close job: run the signal cycle, then queue paper entries + exits.
+
+    Entries become PENDING for the next open; daily exits flag OPEN positions for
+    a next-open close. Intraday stop/target hits are handled by the monitor.
+    """
+    store = store or Storage()
+    result = run_once(store, fetch=fetch)
+    if settings.enable_paper_trading and result.bar_date is not None:
+        book = PaperBook(store)
+        queue_daily_exits(
+            book, store, on=result.bar_date, regime_label=result.regime_label
+        )
+        queue_entries(book, store, on=result.bar_date, regime_label=result.regime_label)
+    return result
+
+
+def daily_summary(store: Storage | None = None, *, on: Date | None = None) -> str:
+    """One end-of-day notification: NAV, vs VOO, open count, today's closed P&L."""
+    store = store or Storage()
+    book = PaperBook(store)
+    prices = {
+        t.ticker: _latest_close(store, t.ticker) for t in book.open_trades()
+    }
+    nav = book.current_nav({k: v for k, v in prices.items() if v is not None})
+    closed_today = [
+        t for t in book.closed_trades() if on is not None and t.exit_date == on
+    ]
+    realized = sum(t.pnl_dollars for t in closed_today)
+    line = notify.notify_daily_summary(
+        nav=nav,
+        budget=book.budget,
+        open_count=len(book.open_trades()),
+        closed_today=len(closed_today),
+        realized_today=realized,
+    )
+    return line
+
+
+def _latest_close(store: Storage, ticker: str) -> float | None:
+    df = store.get_prices(ticker)
+    if df.empty:
+        return None
+    return float(df["close"].iloc[-1])
+
+
+# --------------------------------------------------------------------------- #
+# Trading-calendar guard + scheduler entry points
+# --------------------------------------------------------------------------- #
+def _easter(year: int) -> Date:
+    """Gregorian Easter Sunday (Anonymous algorithm) — anchors Good Friday."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    m = (32 + 2 * e + 2 * i - h - k) % 7
+    n = (a + 11 * h + 22 * m) // 451
+    month, day = divmod(h + m - 7 * n + 114, 31)
+    return Date(year, month, day + 1)
+
+
+def _observed(d: Date) -> Date:
+    """NYSE observance: a Saturday holiday shifts to Friday, a Sunday to Monday."""
+    from datetime import timedelta
+
+    if d.weekday() == 5:  # Saturday
+        return d - timedelta(days=1)
+    if d.weekday() == 6:  # Sunday
+        return d + timedelta(days=1)
+    return d
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> Date:
+    """The ``n``-th ``weekday`` (Mon=0) of a month (n>=1)."""
+    from datetime import timedelta
+
+    first = Date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + 7 * (n - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> Date:
+    """The last ``weekday`` (Mon=0) of a month."""
+    from datetime import timedelta
+
+    nxt = Date(year + 1, 1, 1) if month == 12 else Date(year, month + 1, 1)
+    last = nxt - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+@lru_cache(maxsize=8)
+def _nyse_holidays(year: int) -> frozenset[Date]:
+    """NYSE market holidays for ``year`` (observed dates). Zero-dependency."""
+    from datetime import timedelta
+
+    good_friday = _easter(year) - timedelta(days=2)
+    days = {
+        _observed(Date(year, 1, 1)),  # New Year's Day
+        _nth_weekday(year, 1, 0, 3),  # MLK Day (3rd Mon Jan)
+        _nth_weekday(year, 2, 0, 3),  # Washington's Birthday (3rd Mon Feb)
+        good_friday,
+        _last_weekday(year, 5, 0),  # Memorial Day (last Mon May)
+        _nth_weekday(year, 9, 0, 1),  # Labor Day (1st Mon Sep)
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving (4th Thu Nov)
+        _observed(Date(year, 12, 25)),  # Christmas
+        _observed(Date(year, 7, 4)),  # Independence Day
+    }
+    if year >= 2022:  # Juneteenth became an NYSE holiday in 2022
+        days.add(_observed(Date(year, 6, 19)))
+    return frozenset(days)
+
+
+def is_trading_day(d: Date) -> bool:
+    """True when ``d`` is a US equity trading day (weekday + not an NYSE holiday)."""
+    if d.weekday() >= 5:  # Saturday / Sunday
+        return False
+    return d not in _nyse_holidays(d.year)
+
+
+def _today_market() -> Date:
+    return datetime.now(ZoneInfo(settings.market_tz)).date()
+
+
+def run_daily_eval(store: Storage | None = None) -> CycleResult | None:
+    """Scheduler entry: the daily-close cycle + paper entry/exit queueing."""
+    on = _today_market()
+    if not is_trading_day(on):
+        logger.info("skip daily eval — {} is not a trading day", on)
+        return None
+    return daily_eval(store)
+
+
+def run_market_open(store: Storage | None = None) -> None:
+    """Scheduler entry (~9:31): fill PENDING entries + queued/gapped exits."""
+    on = _today_market()
+    if not (settings.enable_paper_trading and is_trading_day(on)):
+        return
+    store = store or Storage()
+    book = PaperBook(store)
+    if not (book.pending_trades() or book.open_trades()):
+        return
+    execute_market_open(
+        book, on=on, open_price_provider=execution.get_open_price, notify_events=True
+    )
+
+
+def run_monitor(store: Storage | None = None) -> None:
+    """Scheduler entry (every ~5 min): intraday stop/target surveillance."""
+    on = _today_market()
+    if not (settings.enable_paper_trading and is_trading_day(on)):
+        return
+    store = store or Storage()
+    book = PaperBook(store)
+    if not book.open_trades():
+        return
+    monitor_positions(
+        book, price_provider=execution.get_current_price, on=on, notify_events=True
+    )
+
+
+def run_daily_summary(store: Storage | None = None) -> None:
+    """Scheduler entry (~16:30): one end-of-day paper summary notification."""
+    on = _today_market()
+    if not (settings.enable_paper_trading and is_trading_day(on)):
+        return
+    daily_summary(store, on=on)
