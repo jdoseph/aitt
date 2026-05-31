@@ -41,13 +41,13 @@ def render() -> None:
 
         with st.spinner(f"Fetching ~{years}y of history and replaying… (network-heavy)"):
             try:
-                result = jobs.run_portfolio_backtest(cadence=str(cadence), years=int(years))
+                fresh = jobs.run_portfolio_backtest(cadence=str(cadence), years=int(years))
             except Exception as exc:  # noqa: BLE001 - surface the failure, don't crash the page
                 st.error(f"Backtest failed: {exc}")
                 return
-        st.session_state["backtest_result"] = result
+        st.session_state["backtest_result"] = fresh
 
-    result = st.session_state.get("backtest_result")
+    result: BacktestResult | None = st.session_state.get("backtest_result")
     if result is None:
         st.info("Press **Run backtest** to replay the strategy against VOO.")
         return
@@ -129,7 +129,9 @@ def _drawdown_series(nav: list[float]) -> list[float]:
 
 def _metrics_table(strat: PerfStats, bench: PerfStats) -> pd.DataFrame:
     def row(label: str, a: float, b: float, pct: bool = True) -> dict[str, str]:
-        fmt = (lambda x: f"{x * 100:.1f}%") if pct else (lambda x: f"{x:.2f}")
+        def fmt(x: float) -> str:
+            return f"{x * 100:.1f}%" if pct else f"{x:.2f}"
+
         return {"Metric": label, "Strategy": fmt(a), "VOO": fmt(b)}
 
     return pd.DataFrame(

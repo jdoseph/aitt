@@ -63,7 +63,8 @@ def cagr(nav: Sequence[float], dates: Sequence[Date]) -> float:
     years = (dates[-1] - dates[0]).days / 365.25
     if years <= 0:
         return 0.0
-    return (nav[-1] / nav[0]) ** (1.0 / years) - 1.0
+    growth = nav[-1] / nav[0]
+    return float(growth ** (1.0 / years)) - 1.0
 
 
 def max_drawdown(nav: Sequence[float]) -> float:
