@@ -1114,13 +1114,13 @@ These are good v2 candidates but would balloon scope.
 
 ## Open questions
 
-Tagged by priority. **Resolve 🔴 before writing code.** Update this section as decisions get made.
+Tagged by priority. **Resolve 🔴 before writing code.** Update this section as decisions get made. Numbered sequentially across all three priority tiers.
 
 ### 🔴 Must answer before coding (architecture-affecting) — ✅ RESOLVED 2026-05-29
 
 1. **Where does the agent run?** → **This laptop (Windows 11).** Scheduler is designed for "run once after market close + manual `--once`"; missed cycles need no backfill since only the latest daily close matters.
 2. **Data source strategy.** → **(a) yfinance only.** `data.py` exposes a single `fetch_prices()` seam so an Alpha Vantage/Polygon fallback can be added later without touching callers.
-3. **Evaluation cadence.** → **Daily-close only.** One end-of-day evaluation on US trading weekdays. No 30-min intraday loop. This simplifies Session 4's scheduler.
+3. **Evaluation cadence.** → **Daily-close only.** One end-of-day evaluation on US trading weekdays. No 30-min intraday loop. This simplifies Session 4's scheduler. (Session 15 adds an *intraday monitor* for open paper positions, but signal *generation* stays daily-close.)
 4. **Dashboard access.** → **Localhost-only**, no auth/HTTPS.
 
 ### 🟡 Should answer for v1 (feature-affecting)
@@ -1137,33 +1137,27 @@ Tagged by priority. **Resolve 🔴 before writing code.** Update this section as
 14. **Strategy weighting/priority.** Should the dashboard rank strategies equally, or weight some higher? (e.g., IPO base breakout on ANTH > EMA pullback on SIEGY)
 15. **Pattern library.** Start with the 6 candlestick patterns listed, or include more? `pandas-ta` supports ~60 patterns — too many creates noise. Which additional patterns (if any) are worth including?
 16. **Confidence threshold for alerts.** Should ⭐ signals still fire desktop notifications, or only ⭐⭐+? Lower threshold = more alerts but more noise.
-
-*(Session 13/14 questions — numbered 27–29 to avoid clashing with the 🟢 items 17–26 below.)*
-
-27. **Exposure floor in RISK_OFF.** Default 30% invested. Go fully to cash (0%) for maximum defense, or keep a floor to avoid missing sharp recoveries? Backtest both in Session 14.
-28. **Concentration vs. smoothness.** `max_positions` 6 and `max_position_pct` 25% is aggressive. More positions / lower caps = smoother, closer to the index. Tune against the Session 14 Sharpe.
-29. **Rebalance cadence.** Weekly default. Daily churns/costs more; monthly is calmer but slower to cut losers. Let the backtest's turnover/cost drag decide.
-
-*(Session 15 — autonomous paper trading — questions, numbered 30–34.)*
-
-30. **Paper budget amount.** What $ amount to start the paper account with? Suggested $5,000 to mirror the mock experiment. Changeable in config anytime without resetting trade history.
-31. **Minimum grade for paper entries.** Default "DECENT" — only HIGH-QUALITY and DECENT setups open positions. Should MARGINAL setups ever open a starter position?
-32. **Stop type.** The dossier suggests a stop by setup type (below 21 EMA / range low / swing low). Should the paper engine always use the dossier stop, or add a hard maximum stop (e.g., never more than 8% below entry)?
-33. **Intraday data delay.** yfinance free tier has ~15 min delay. Accept for paper trading, or pay for a real-time feed? Default: accept and document it.
-34. **Notification volume.** With 5+ open positions, the intraday monitor can fire many notifications. Throttle to only "material" events (stop hit, target hit, daily summary)?
+17. **Exposure floor in RISK_OFF** (Session 13). Default 30% invested. Go fully to cash (0%) for maximum defense, or keep a floor to avoid missing sharp recoveries? Backtest both in Session 14.
+18. **Concentration vs. smoothness** (Session 13). `max_positions` 6 and `max_position_pct` 25% is aggressive. More positions / lower caps = smoother, closer to the index. Tune against the Session 14 Sharpe.
+19. **Rebalance cadence** (Session 13). Weekly default. Daily churns/costs more; monthly is calmer but slower to cut losers. Let the backtest's turnover/cost drag decide.
+20. **Paper budget amount** (Session 15). What $ amount to start the paper account with? Suggested $5,000 to mirror the mock experiment. Changeable in config anytime without resetting trade history.
+21. **Minimum grade for paper entries** (Session 15). Default "DECENT" — only HIGH-QUALITY and DECENT setups open positions. Should MARGINAL setups ever open a starter position?
+22. **Stop type** (Session 15). The dossier suggests a stop by setup type (below 21 EMA / range low / swing low). Should the paper engine always use the dossier stop, or add a hard maximum stop (e.g., never more than 8% below entry)?
+23. **Intraday data delay** (Session 15). yfinance free tier has ~15 min delay. Accept for paper trading, or pay for a real-time feed? Default: accept and document it.
+24. **Notification volume** (Session 15). With 5+ open positions, the intraday monitor can fire many notifications. Throttle to only "material" events (stop hit, target hit, daily summary)?
 
 ### 🟢 Nice-to-have (defer to v2 unless requested)
 
-17. **Trade journal.** Let user mark "I bought this alert at $X" and track outcomes. → **Part of the deferred v2 portfolio-aware track** (needs a holdings input; see after Session 12).
-18. **Historical signal viewer.** → **Scheduled (Session 8):** a lightweight per-setup historical replay computes the forward 5/10/20-day win rate for each (ticker, strategy, status). Not a full backtester — just base rates for the scorecard's "historical edge" check.
-19. **International tickers.** yfinance supports SIE.DE, 6981.T, etc. Include non-ADR foreign tickers?
-20. **Multi-timeframe.** 4h and 1h EMAs alongside daily. → **Weekly** trend alignment is now Session 12; 4h/1h intraday stays a v2 candidate.
-21. **News/catalyst tagging.** → **Scheduled (Session 8):** recent headlines via yfinance + an earnings-beat heuristic feed the scorecard's "catalysts" check. Earnings proximity is its own check (Session 7). No NLP/sentiment.
-22. **Relative strength overlay.** → **Scheduled (Session 7):** relative strength vs SPY / QQQ / SMH is a scorecard check; the dashboard can surface the strongest names.
-23. **IPO news scanner.** Auto-detect Anthropic/OpenAI IPO filings (S-1, pricing) from news feeds and auto-add tickers.
-24. **Value chain flow alerts.** "3 out of 5 interconnect stocks are consolidating" — layer-level signal aggregation. → **Scheduled (Session 11)** via layer-strength scoring.
-25. **Sector rotation detection.** When money moves between value chain layers (e.g., from semis to power), flag the shift. → **Scheduled (Session 11)** via layer-rotation Δ.
-26. **Chart pattern detection (multi-week).** Double bottom, inverse head and shoulders, cup and handle — heavier computation but higher conviction signals.
+25. **Trade journal.** Let user mark "I bought this alert at $X" and track outcomes. → **Part of the deferred v2 portfolio-aware track** (needs a holdings input; see after Session 15).
+26. **Historical signal viewer.** → **Scheduled (Session 8):** a lightweight per-setup historical replay computes the forward 5/10/20-day win rate for each (ticker, strategy, status). Not a full backtester — just base rates for the scorecard's "historical edge" check.
+27. **International tickers.** yfinance supports SIE.DE, 6981.T, etc. Include non-ADR foreign tickers?
+28. **Multi-timeframe.** 4h and 1h EMAs alongside daily. → **Weekly** trend alignment is now Session 12; 4h/1h intraday stays a v2 candidate.
+29. **News/catalyst tagging.** → **Scheduled (Session 8):** recent headlines via yfinance + an earnings-beat heuristic feed the scorecard's "catalysts" check. Earnings proximity is its own check (Session 7). No NLP/sentiment.
+30. **Relative strength overlay.** → **Scheduled (Session 7):** relative strength vs SPY / QQQ / SMH is a scorecard check; the dashboard can surface the strongest names.
+31. **IPO news scanner.** Auto-detect Anthropic/OpenAI IPO filings (S-1, pricing) from news feeds and auto-add tickers.
+32. **Value chain flow alerts.** "3 out of 5 interconnect stocks are consolidating" — layer-level signal aggregation. → **Scheduled (Session 11)** via layer-strength scoring.
+33. **Sector rotation detection.** When money moves between value chain layers (e.g., from semis to power), flag the shift. → **Scheduled (Session 11)** via layer-rotation Δ.
+34. **Chart pattern detection (multi-week).** Double bottom, inverse head and shoulders, cup and handle — heavier computation but higher conviction signals.
 
 ### Assumptions made silently (override anytime)
 
