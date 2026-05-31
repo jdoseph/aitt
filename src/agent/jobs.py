@@ -14,7 +14,8 @@ import pandas as pd
 from loguru import logger
 
 from src.agent import notify
-from src.core import backtest, benchmarks, earnings, news
+from src.core import backtest, backtest_portfolio, benchmarks, earnings, news
+from src.core.backtest_portfolio import BacktestResult
 from src.core.config import settings
 from src.core.data import DataFetchError, fetch_many, fetch_prices
 from src.core.signals import CycleResult, SignalEngine
@@ -56,6 +57,41 @@ def evaluate_signals(
         benchmark_price_provider=_latest_benchmark_close,
     )
     return engine.run_cycle(price_map)
+
+
+def run_portfolio_backtest(
+    tickers: list[str] | None = None,
+    *,
+    fetcher: Callable[[str, int], pd.DataFrame] | None = None,
+    cadence: str | None = None,
+    years: int | None = None,
+) -> BacktestResult:
+    """Fetch extended history and replay the portfolio mechanism vs VOO (Session 14).
+
+    Network-heavy (one extended fetch per ticker + the benchmark), so this is a
+    manual/dashboard action, not part of the daily cycle. ``fetcher`` is injected
+    in tests to stay offline; failures per ticker are skipped, not fatal.
+    """
+    tickers = tickers or load_watchlist().tickers
+    years = years or settings.backtest_years
+    bars = int(years * settings.trading_days_per_year * 1.1) + 5
+    fetch = fetcher or (lambda t, b: fetch_prices(t, bars=b))
+
+    def _safe(ticker: str) -> pd.DataFrame:
+        try:
+            return fetch(ticker, bars)
+        except DataFetchError as exc:
+            logger.warning("backtest fetch failed for {}: {}", ticker, exc)
+            return pd.DataFrame()
+
+    price_map = {t: df for t in tickers if not (df := _safe(t)).empty}
+    benchmark_df = _safe(settings.portfolio_benchmark)
+    if benchmark_df.empty:
+        logger.warning("backtest benchmark {} unavailable", settings.portfolio_benchmark)
+        return BacktestResult()
+    return backtest_portfolio.run_backtest(
+        price_map, benchmark_df, cadence=cadence, years=years
+    )
 
 
 def _latest_benchmark_close() -> float | None:

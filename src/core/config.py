@@ -185,6 +185,12 @@ class Settings(BaseSettings):
     portfolio_benchmark: str = "VOO"  # NAV is always benchmarked against the index
     enable_portfolio: bool = True
 
+    # --- Session 14: walk-forward backtest vs VOO ---
+    backtest_years: int = 5  # history window to replay
+    cost_per_trade_bps: float = 10.0  # round-trip turnover cost (basis points)
+    slippage_bps: float = 5.0  # additional slippage per unit of turnover (bps)
+    trading_days_per_year: int = 252  # annualization factor for risk metrics
+
     # --- alerts ---
     min_confidence_stars: int = 1
     alert_desktop: bool = True
