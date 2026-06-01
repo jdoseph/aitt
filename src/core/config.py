@@ -193,7 +193,7 @@ class Settings(BaseSettings):
 
     # --- Session 15: autonomous paper trading engine ---
     enable_paper_trading: bool = True
-    paper_budget: float = 5000.0  # fake-money budget the engine trades within
+    paper_budget: float = 1500.0  # fake-money budget the engine trades within
     paper_min_score: float = 55.0  # composite score floor to open a paper entry
     paper_min_grade: str = "DECENT"  # scorecard grade floor to open a paper entry
     min_position_size: float = 200.0  # smallest dollar position the engine will open
