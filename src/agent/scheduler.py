@@ -82,6 +82,34 @@ def run_scheduled() -> None:
             coalesce=True,
         )
 
+    if settings.enable_options and settings.trade_instrument in ("option", "both"):
+        o_open_h, o_open_m = settings.market_open_hm
+        o_start_h, _ = settings.monitor_start_hm
+        o_end_h, _ = settings.monitor_end_hm
+        o_sum_h, o_sum_m = settings.daily_summary_hm
+        scheduler.add_job(
+            jobs.run_option_market_open,
+            trigger=CronTrigger(day_of_week="mon-fri", hour=o_open_h, minute=o_open_m,
+                                timezone=settings.market_tz),
+            id="option_market_open", name="Market-open option fills",
+            misfire_grace_time=600, coalesce=True,
+        )
+        scheduler.add_job(
+            jobs.run_option_monitor,
+            trigger=CronTrigger(day_of_week="mon-fri", hour=f"{o_start_h}-{o_end_h}",
+                                minute=f"*/{settings.monitor_interval_minutes}",
+                                timezone=settings.market_tz),
+            id="option_monitor", name="Intraday option monitor",
+            misfire_grace_time=settings.monitor_interval_minutes * 60, coalesce=True,
+        )
+        scheduler.add_job(
+            jobs.run_option_summary,
+            trigger=CronTrigger(day_of_week="mon-fri", hour=o_sum_h, minute=o_sum_m,
+                                timezone=settings.market_tz),
+            id="option_summary", name="End-of-day option summary",
+            misfire_grace_time=3600, coalesce=True,
+        )
+
     logger.info(
         "Agent started — daily eval {:02d}:{:02d}, paper engine {} ({}). Ctrl-C to stop.",
         settings.eod_eval_hour,

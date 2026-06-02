@@ -483,25 +483,32 @@ def daily_eval(store: Storage | None = None, *, fetch: bool = True) -> CycleResu
     store = store or Storage()
     result = run_once(store, fetch=fetch)
     if settings.enable_paper_trading and result.bar_date is not None:
-        book = PaperBook(store)
-        queue_daily_exits(
-            book, store, on=result.bar_date, regime_label=result.regime_label
-        )
-        queue_entries(book, store, on=result.bar_date, regime_label=result.regime_label)
-        open_prices = {
-            t.ticker: px
-            for t in book.open_trades()
-            if (px := _latest_close(store, t.ticker)) is not None
-        }
-        record_cashbook(
-            book,
-            store,
-            on=result.bar_date,
-            regime_label=result.regime_label,
-            exposure_pct=result.exposure,
-            open_prices=open_prices,
-            voo_price=_benchmark_price(),
-        )
+        if settings.trade_instrument in ("stock", "both"):
+            book = PaperBook(store)
+            queue_daily_exits(
+                book, store, on=result.bar_date, regime_label=result.regime_label
+            )
+            queue_entries(book, store, on=result.bar_date, regime_label=result.regime_label)
+            open_prices = {
+                t.ticker: px
+                for t in book.open_trades()
+                if (px := _latest_close(store, t.ticker)) is not None
+            }
+            record_cashbook(
+                book,
+                store,
+                on=result.bar_date,
+                regime_label=result.regime_label,
+                exposure_pct=result.exposure,
+                open_prices=open_prices,
+                voo_price=_benchmark_price(),
+            )
+        if settings.enable_options and settings.trade_instrument in ("option", "both"):
+            obook = OptionBook(store)
+            queue_option_entries(
+                obook, store, on=result.bar_date, regime_label=result.regime_label,
+                price_provider=store.get_prices,
+            )
     return result
 
 
@@ -827,3 +834,52 @@ def run_daily_summary(store: Storage | None = None) -> None:
     if not (settings.enable_paper_trading and is_trading_day(on)):
         return
     daily_summary(store, on=on)
+
+
+# --------------------------------------------------------------------------- #
+# Session 16 — options scheduler entry points
+# --------------------------------------------------------------------------- #
+def _options_active() -> bool:
+    return settings.enable_options and settings.trade_instrument in ("option", "both")
+
+
+def _option_underlying_now(ticker: str) -> float | None:
+    return execution.get_current_price(ticker)
+
+
+def run_option_market_open(store: Storage | None = None) -> None:
+    """Scheduler entry (~9:31): fill PENDING option entries at the open."""
+    on = _today_market()
+    if not (_options_active() and is_trading_day(on)):
+        return
+    store = store or Storage()
+    book = OptionBook(store)
+    if not book.pending_trades():
+        return
+    execute_option_open(
+        book, on=on,
+        underlying_provider=lambda t, d: execution.get_open_price(t, d),
+        notify_events=True,
+    )
+
+
+def run_option_monitor(store: Storage | None = None) -> None:
+    """Scheduler entry (every ~5 min): mark + exit OPEN option positions."""
+    on = _today_market()
+    if not (_options_active() and is_trading_day(on)):
+        return
+    store = store or Storage()
+    book = OptionBook(store)
+    if not book.open_trades():
+        return
+    monitor_option_positions(book, on=on, underlying_provider=_option_underlying_now, notify_events=True)
+
+
+def run_option_summary(store: Storage | None = None) -> None:
+    """Scheduler entry (~16:30): option NAV summary + cashbook row."""
+    on = _today_market()
+    if not (_options_active() and is_trading_day(on)):
+        return
+    store = store or Storage()
+    voo = execution.get_current_price(settings.portfolio_benchmark)
+    option_daily_summary(store, on=on, underlying_provider=_option_underlying_now, voo_price=voo)

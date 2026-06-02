@@ -122,3 +122,22 @@ def test_option_daily_summary_writes_cashbook() -> None:
     cb = store.get_option_cashbook()
     assert len(cb) == 1
     assert cb[0].total_nav > 0.0
+
+
+def test_daily_eval_queues_options_when_enabled(monkeypatch: "pytest.MonkeyPatch") -> None:
+    from src.core.config import settings as cfg
+    store = Storage.in_memory()
+    on = date(2024, 3, 1)
+    _seed_candidate(store, "NVDA", on=on, score=80, rank=1, grade="HIGH-QUALITY")
+    store.upsert_prices("NVDA", _price_df(100.0))
+
+    monkeypatch.setattr(cfg, "trade_instrument", "option")
+    monkeypatch.setattr(cfg, "enable_paper_trading", True)
+    # avoid the network signal cycle: drive the option queue directly
+    book = OptionBook(store, budget=cfg.paper_budget)
+    jobs.queue_option_entries(
+        book, store, on=on, regime_label="RISK_ON",
+        price_provider=lambda t: store.get_prices(t),
+        chain_provider=lambda t, dte, as_of: None,
+    )
+    assert len(store.get_option_trades(status="PENDING")) == 1
