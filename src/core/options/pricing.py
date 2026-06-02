@@ -9,6 +9,7 @@ live chain is only consulted at entry (see chain.py).
 from __future__ import annotations
 
 import math
+from typing import Any
 
 
 def _norm_cdf(x: float) -> float:
@@ -78,3 +79,25 @@ def implied_vol(
         else:
             lo = mid
     return 0.5 * (lo + hi)
+
+
+def entry_premium(
+    contract: Any,  # OptionContract (imported lazily to avoid a cycle)
+    *,
+    underlying: float,
+    on: Any,  # datetime.date
+    chain: dict[str, Any] | None,
+    risk_free_rate: float,
+) -> tuple[float, str]:
+    """Entry premium per the hybrid rule: live chain mid if the strike is quoted,
+    else Black-Scholes. Returns ``(premium, source)`` where source is chain|model.
+    """
+    if chain is not None and chain.get("calls"):
+        for c in chain["calls"]:
+            if abs(float(c["strike"]) - contract.strike) < 1e-9:
+                bid, ask = float(c.get("bid", 0.0)), float(c.get("ask", 0.0))
+                if bid > 0.0 and ask > 0.0:
+                    return (bid + ask) / 2.0, "chain"
+    dte = (contract.expiry - on).days if contract.expiry is not None else 0
+    t_years = max(dte, 0) / 365.0
+    return bs_price(underlying, contract.strike, t_years, risk_free_rate, contract.iv, call=True), "model"

@@ -40,3 +40,35 @@ def test_implied_vol_round_trip() -> None:
     price = p.bs_price(S, K, T, r, sig, call=True)
     solved = p.implied_vol(price, S, K, T, r, call=True)
     assert solved == pytest.approx(0.35, abs=1e-3)
+
+
+from datetime import date
+
+from src.core.options.contracts import OptionContract
+
+
+def _contract(source: str) -> OptionContract:
+    return OptionContract(
+        option_type="call", strike=95.0, expiry=date(2024, 4, 19),
+        dte=45, iv=0.30, delta=0.60, source=source,
+    )
+
+
+def test_entry_premium_model_path_uses_black_scholes() -> None:
+    c = _contract("model")
+    prem, src = p.entry_premium(
+        c, underlying=100.0, on=date(2024, 3, 5), chain=None, risk_free_rate=0.04
+    )
+    assert src == "model"
+    assert prem > 5.0
+
+
+def test_entry_premium_chain_path_uses_mid() -> None:
+    c = _contract("chain")
+    chain = {"expiry": date(2024, 4, 19),
+             "calls": [{"strike": 95.0, "bid": 7.0, "ask": 7.4, "iv": 0.33, "open_interest": 500}]}
+    prem, src = p.entry_premium(
+        c, underlying=100.0, on=date(2024, 3, 5), chain=chain, risk_free_rate=0.04
+    )
+    assert src == "chain"
+    assert prem == pytest.approx(7.2)  # (7.0 + 7.4)/2
