@@ -15,7 +15,7 @@ from loguru import logger
 from src.core.config import Settings, settings
 from src.core.regime import RISK_OFF, RISK_ON
 from src.core.signals import Alert, CycleResult
-from src.core.storage import PaperTrade
+from src.core.storage import OptionTrade, PaperTrade
 
 _SEVERITY_PREFIX = {"entry": "🟢 ENTRY", "secondary": "🟡 DIP", "warning": "🔴 WARNING"}
 
@@ -245,4 +245,48 @@ def notify_daily_summary(
     )
     logger.info(line)
     _desktop_best_effort("📊 Paper EOD summary", line)
+    return line
+
+
+# --------------------------------------------------------------------------- #
+# Session 16 — option-trade notifications
+# --------------------------------------------------------------------------- #
+_OPT_EXIT_ICON = {
+    "EXIT_STOP": "🛑 STOP",
+    "EXIT_TARGET": "🎯 TARGET",
+    "EXIT_OPT_TP": "🎯 +PREM",
+    "EXIT_OPT_SL": "🛑 -PREM",
+    "EXIT_DTE": "⏲ DTE",
+    "EXIT_EXPIRY": "📅 EXPIRY",
+}
+
+
+def format_option_opened(t: OptionTrade) -> str:
+    exp = t.expiry.isoformat() if t.expiry else "?"
+    return (
+        f"📈 OPENED {t.ticker} {t.strike:g}C {exp}: {t.contracts}x @ ${t.entry_premium:,.2f} "
+        f"(${t.cost_basis:,.0f}, {t.price_source})"
+    )
+
+
+def format_option_closed(t: OptionTrade) -> str:
+    icon = _OPT_EXIT_ICON.get(t.exit_reason, t.exit_reason or "CLOSED")
+    sign = "+" if t.pnl_dollars >= 0 else ""
+    return (
+        f"{icon} {t.ticker} {t.strike:g}C: {sign}${t.pnl_dollars:,.0f} "
+        f"({sign}{t.pnl_pct:.1f}%) in {t.holding_days}d"
+    )
+
+
+def notify_option_opened(t: OptionTrade) -> str:
+    line = format_option_opened(t)
+    logger.info(line)
+    _desktop_best_effort(f"📈 {t.ticker} call opened", line)
+    return line
+
+
+def notify_option_closed(t: OptionTrade) -> str:
+    line = format_option_closed(t)
+    logger.info(line)
+    _desktop_best_effort(f"{t.ticker} call closed", line)
     return line

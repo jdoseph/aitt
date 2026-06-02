@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import date as Date
 from datetime import datetime
 from functools import lru_cache
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -24,9 +25,14 @@ from src.core.backtest_portfolio import BacktestResult
 from src.core.config import settings
 from src.core.data import DataFetchError, fetch_many, fetch_prices
 from src.core.execution import BUY, SELL, Side, check_gap, slippage_bps
+from src.core.options import chain as option_chain
+from src.core.options import vol as option_vol
+from src.core.options.contracts import OptionContract, select_contract
+from src.core.options.option_trades import OptionBook, evaluate_exit, mark_premium
+from src.core.options.pricing import entry_premium
 from src.core.paper_trades import PaperBook
 from src.core.signals import CycleResult, SignalEngine
-from src.core.storage import CashbookEntry, PaperTrade, Storage
+from src.core.storage import CashbookEntry, OptionTrade, PaperTrade, Storage
 from src.core.watchlist import load_watchlist
 
 # A daily exit's priority order (lower index = higher priority).
@@ -35,6 +41,12 @@ _GRADE_ORDER = ["AVOID", "MARGINAL", "DECENT", "HIGH-QUALITY"]
 
 # Default slippage estimator: liquidity tier only (no live market-cap / ADV here).
 SlippageFn = Callable[[str, Side, float], float]
+
+# Session 16 — injectable providers for the options jobs (offline in tests).
+ChainProvider = Callable[[str, int, Date], "dict[str, Any] | None"]
+UnderlyingDateProvider = Callable[[str, Date], "float | None"]
+UnderlyingProvider = Callable[[str], "float | None"]
+PriceFrameProvider = Callable[[str], pd.DataFrame]
 
 
 def _default_slippage(ticker: str, side: Side, position_dollars: float) -> float:
@@ -526,6 +538,134 @@ def _latest_close(store: Storage, ticker: str) -> float | None:
     if df.empty:
         return None
     return float(df["close"].iloc[-1])
+
+
+# --------------------------------------------------------------------------- #
+# Session 16 — options expression layer jobs
+# --------------------------------------------------------------------------- #
+def _default_chain_provider(ticker: str, dte: int, as_of: Date) -> dict[str, Any] | None:
+    return option_chain.fetch_chain(ticker, target_dte=dte, as_of=as_of)
+
+
+def queue_option_entries(
+    book: OptionBook,
+    store: Storage,
+    *,
+    on: Date,
+    regime_label: str,
+    price_provider: PriceFrameProvider,
+    chain_provider: ChainProvider | None = None,
+) -> list[OptionTrade]:
+    """Queue PENDING long calls from the day's graded candidates (same gates as stock)."""
+    if regime_label == "RISK_OFF":
+        return []
+    chain_provider = chain_provider or _default_chain_provider
+    created: list[OptionTrade] = []
+    for ds in store.get_daily_scores(on):
+        if ds.score < settings.paper_min_score:
+            continue
+        if book.has_active(ds.ticker):
+            continue
+        dossier = store.latest_dossier(ds.ticker)
+        if dossier is None or dossier.date != on or not _grade_ok(dossier.grade, settings.paper_min_grade):
+            continue
+        df = price_provider(ds.ticker)
+        if df is None or df.empty:
+            continue
+        plan = json.loads(dossier.summary or "{}").get("trade_plan", {})
+        stop = float(plan.get("stop") or 0.0)
+        target = float(plan.get("target") or 0.0)
+        chain = chain_provider(ds.ticker, settings.option_target_dte, on)
+        iv = option_vol.realized_vol(df)
+        if chain is not None and chain.get("calls"):
+            atm = min(chain["calls"], key=lambda c: abs(float(c["strike"]) - float(df["close"].iloc[-1])))
+            if atm.get("iv"):
+                iv = float(atm["iv"])
+        contract = select_contract(
+            ds.ticker, df, as_of=on, chain=chain,
+            target_delta=settings.option_target_delta,
+            target_dte=settings.option_target_dte, iv=iv,
+            risk_free_rate=settings.risk_free_rate,
+        )
+        est_prem, _ = entry_premium(
+            contract, underlying=float(df["close"].iloc[-1]), on=on,
+            chain=chain, risk_free_rate=settings.risk_free_rate,
+        )
+        # Fund each name up to the per-name cap; create_pending floors to whole
+        # contracts and returns None if not even one contract fits.
+        trade = book.create_pending(
+            ticker=ds.ticker, strategy="composite", contract=contract,
+            snapshot={"composite": ds.score, "rank": ds.rank, "grade": dossier.grade,
+                      "regime": regime_label, "dossier": json.loads(dossier.summary or "{}")},
+            planned_dollars=settings.max_position_pct * book.budget,
+            entry_premium_est=est_prem, underlying_stop=stop, underlying_target=target,
+        )
+        if trade is not None:
+            created.append(trade)
+    return created
+
+
+def execute_option_open(
+    book: OptionBook,
+    *,
+    on: Date,
+    underlying_provider: UnderlyingDateProvider,
+    chain_provider: ChainProvider | None = None,
+    notify_events: bool = False,
+) -> list[OptionTrade]:
+    """Fill PENDING long calls at the next open's underlying + hybrid premium."""
+    chain_provider = chain_provider or _default_chain_provider
+    opened: list[OptionTrade] = []
+    for t in book.pending_trades():
+        under = underlying_provider(t.ticker, on)
+        if under is None:
+            continue
+        contract = OptionContract(
+            option_type=t.option_type, strike=t.strike, expiry=t.expiry or on,
+            dte=t.dte_at_entry, iv=t.entry_iv, delta=t.entry_delta, source=t.price_source,
+        )
+        chain = chain_provider(t.ticker, settings.option_target_dte, on)
+        prem, source = entry_premium(
+            contract, underlying=under, on=on, chain=chain, risk_free_rate=settings.risk_free_rate,
+        )
+        bps = 0.0 if source == "chain" else settings.option_slippage_bps_model
+        fill = prem * (1.0 + bps / 10_000.0)
+        t.price_source = source
+        done = book.execute_pending(t, fill_premium=fill, on=on, underlying=under)
+        opened.append(done)
+    if notify_events:
+        for t in opened:
+            notify.notify_option_opened(t)
+    return opened
+
+
+def monitor_option_positions(
+    book: OptionBook,
+    *,
+    on: Date,
+    underlying_provider: UnderlyingProvider,
+    notify_events: bool = False,
+) -> list[OptionTrade]:
+    """Mark OPEN calls (Black-Scholes) and close the first that trips an exit rule."""
+    closed: list[OptionTrade] = []
+    for t in book.open_trades():
+        under = underlying_provider(t.ticker)
+        if under is None:
+            continue
+        prem = mark_premium(
+            t, underlying=under, on=on, iv=t.entry_iv, risk_free_rate=settings.risk_free_rate,
+        )
+        reason = evaluate_exit(t, underlying=under, premium=prem, on=on)
+        if reason:
+            exit_prem = max(0.0, under - t.strike) if reason == "EXIT_EXPIRY" else prem
+            done = book.close_trade(
+                t, exit_premium=exit_prem, exit_reason=reason, on=on, underlying=under,
+            )
+            closed.append(done)
+    if notify_events:
+        for t in closed:
+            notify.notify_option_closed(t)
+    return closed
 
 
 # --------------------------------------------------------------------------- #
