@@ -225,6 +225,24 @@ class Settings(BaseSettings):
     monitor_end_hhmm: str = "15:55"
     daily_summary_hhmm: str = "16:30"
 
+    # --- Session 16: options expression layer ---
+    # "stock" trades only the S15 share book, "option" only the option book,
+    # "both" runs them in parallel against the same signals.
+    trade_instrument: str = "both"  # "stock" | "option" | "both"
+    enable_options: bool = True
+    option_structure: str = "long_call"  # only long calls in this session
+    option_target_delta: float = 0.60  # strike nearest this delta (slightly ITM)
+    option_target_dte: int = 45  # expiry nearest this many days to expiration
+    option_min_dte_exit: int = 21  # close at/under this DTE (theta/gamma cliff guard)
+    option_tp_pct: float = 50.0  # take profit at +this% of entry premium
+    option_sl_pct: float = 50.0  # stop at -this% of entry premium
+    risk_free_rate: float = 0.04  # annualized, for Black-Scholes
+    option_iv_premium_mult: float = 1.1  # realized-vol proxy is scaled by this
+    realized_vol_window: int = 20  # trading days for the realized-vol estimate
+    option_slippage_bps_model: float = 50.0  # slippage when a fill is model-priced
+    option_chain_min_oi: int = 10  # min open interest for a live chain to be "usable"
+    option_multiplier: int = 100  # shares per contract
+
     # --- alerts ---
     min_confidence_stars: int = 1
     alert_desktop: bool = True
