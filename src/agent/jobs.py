@@ -668,6 +668,42 @@ def monitor_option_positions(
     return closed
 
 
+def option_daily_summary(
+    store: Storage,
+    *,
+    on: Date,
+    underlying_provider: UnderlyingProvider,
+    voo_price: float | None,
+) -> str:
+    """Mark the option book to NAV, write an option_cashbook row, notify once."""
+    book = OptionBook(store)
+    marks: dict[int, float] = {}
+    for t in book.open_trades():
+        under = underlying_provider(t.ticker)
+        if under is None:
+            continue
+        marks[t.trade_id or -1] = mark_premium(
+            t, underlying=under, on=on, iv=t.entry_iv, risk_free_rate=settings.risk_free_rate,
+        )
+    nav = book.current_nav(marks)
+    invested = book.invested_value(marks)
+    history = store.get_option_cashbook()
+    voo_start = next((c.voo_price for c in history if c.voo_price), voo_price)
+    voo_nav = book.voo_nav(voo_start, voo_price) if (voo_price and voo_start) else book.budget
+    reg = store.latest_regime()
+    regime = reg.label if reg is not None else ""
+    store.upsert_option_cashbook(
+        date=on, total_nav=nav, voo_nav=voo_nav, invested_value=invested,
+        regime=regime, voo_price=voo_price or 0.0,
+    )
+    closed_today = [t for t in book.closed_trades() if t.exit_date == on]
+    realized = sum(t.pnl_dollars for t in closed_today)
+    return notify.notify_daily_summary(
+        nav=nav, budget=book.budget, open_count=len(book.open_trades()),
+        closed_today=len(closed_today), realized_today=realized,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Trading-calendar guard + scheduler entry points
 # --------------------------------------------------------------------------- #

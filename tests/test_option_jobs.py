@@ -102,3 +102,23 @@ def test_monitor_option_positions_closes_on_target() -> None:
     )
     assert len(closed) == 1
     assert closed[0].exit_reason == "EXIT_TARGET"
+
+
+def test_option_daily_summary_writes_cashbook() -> None:
+    store = Storage.in_memory()
+    book = OptionBook(store, budget=5000.0)
+    from src.core.options.contracts import OptionContract
+    c = OptionContract(option_type="call", strike=95.0, expiry=date(2024, 4, 19),
+                       dte=45, iv=0.30, delta=0.60, source="model")
+    t = book.create_pending(ticker="NVDA", strategy="composite", contract=c, snapshot={},
+                            planned_dollars=1500.0, entry_premium_est=7.0,
+                            underlying_stop=90.0, underlying_target=120.0)
+    book.execute_pending(t, fill_premium=7.0, on=date(2024, 3, 1), underlying=100.0)
+    jobs.option_daily_summary(
+        store, on=date(2024, 3, 4),
+        underlying_provider=lambda t: 102.0,
+        voo_price=None,
+    )
+    cb = store.get_option_cashbook()
+    assert len(cb) == 1
+    assert cb[0].total_nav > 0.0
