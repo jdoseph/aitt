@@ -152,3 +152,45 @@ class OptionBook:
         trade.gap_note = gap_note
         trade.status = "CLOSED"
         return self.storage.update_option_trade(trade)
+
+
+# --------------------------------------------------------------------------- #
+# Marking + exit evaluation (module-level, pure)
+# --------------------------------------------------------------------------- #
+def mark_premium(
+    trade: OptionTrade, *, underlying: float, on: Date, iv: float, risk_free_rate: float
+) -> float:
+    """Black-Scholes mark for an open call given today's underlying + IV.
+
+    DTE is measured from ``on`` to expiry; at/after expiry the mark is intrinsic.
+    """
+    from src.core.options.pricing import bs_price
+
+    if trade.expiry is None:
+        return max(0.0, underlying - trade.strike)
+    dte = (trade.expiry - on).days
+    t_years = max(dte, 0) / 365.0
+    return bs_price(underlying, trade.strike, t_years, risk_free_rate, iv, call=True)
+
+
+def evaluate_exit(trade: OptionTrade, *, underlying: float, premium: float, on: Date) -> str:
+    """Return the first-tripped exit reason (whichever-first), or '' to hold.
+
+    Priority: underlying stop → underlying target → premium take-profit →
+    premium stop → min-DTE guard → expiry.
+    """
+    if trade.underlying_stop and underlying <= trade.underlying_stop:
+        return "EXIT_STOP"
+    if trade.underlying_target and underlying >= trade.underlying_target:
+        return "EXIT_TARGET"
+    if trade.tp_premium and premium >= trade.tp_premium:
+        return "EXIT_OPT_TP"
+    if trade.sl_premium and premium <= trade.sl_premium:
+        return "EXIT_OPT_SL"
+    if trade.expiry is not None:
+        dte = (trade.expiry - on).days
+        if dte <= 0:
+            return "EXIT_EXPIRY"
+        if dte <= settings.option_min_dte_exit:
+            return "EXIT_DTE"
+    return ""
