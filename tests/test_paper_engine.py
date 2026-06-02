@@ -124,6 +124,70 @@ def test_format_daily_summary_shows_alpha_vs_budget() -> None:
     assert "+$300" in line and "3 open" in line
 
 
+def test_format_daily_summary_surfaces_pending_count() -> None:
+    line = notify.format_daily_summary(
+        nav=5000.0, budget=5000.0, open_count=0, closed_today=0, realized_today=0.0, pending=6
+    )
+    assert "6 queued" in line
+
+
+def test_format_daily_summary_omits_pending_when_zero() -> None:
+    line = notify.format_daily_summary(
+        nav=5000.0, budget=5000.0, open_count=0, closed_today=0, realized_today=0.0, pending=0
+    )
+    assert "queued" not in line
+
+
+# --- cashbook persistence (Session 15 fix) ---------------------------------- #
+def test_record_cashbook_persists_nav_and_anchors_voo_at_budget() -> None:
+    store = Storage.in_memory()
+    book = PaperBook(store, budget=1500.0)
+    on = date(2024, 1, 3)
+    t = book.create_pending(
+        ticker="NVDA", strategy="x", signal_id=None, snapshot={},
+        planned_dollars=600.0, stop_price=1.0, target_price=9999.0,
+    )
+    book.execute_pending(t, open_price=100.0, slippage_bps=0.0, on=on)
+    entry = jobs.record_cashbook(
+        book, store, on=on, regime_label="RISK_ON", exposure_pct=0.6,
+        open_prices={"NVDA": 110.0}, voo_price=500.0,
+    )
+    # cash 900 (1500-600) + MV 660 (6sh*110) = 1560
+    assert entry.total_nav == pytest.approx(1560.0)
+    assert entry.invested_value == pytest.approx(660.0)
+    assert entry.voo_nav == pytest.approx(1500.0)  # first recorded day anchors at budget
+    assert entry.voo_price == pytest.approx(500.0)
+    assert entry.regime == "RISK_ON"
+    assert store.get_cashbook()[-1].date == on
+
+
+def test_record_cashbook_voo_tracks_benchmark_next_day() -> None:
+    store = Storage.in_memory()
+    book = PaperBook(store, budget=1500.0)
+    jobs.record_cashbook(
+        book, store, on=date(2024, 1, 3), regime_label="RISK_ON", exposure_pct=0.0,
+        open_prices={}, voo_price=500.0,
+    )
+    e2 = jobs.record_cashbook(
+        book, store, on=date(2024, 1, 4), regime_label="RISK_ON", exposure_pct=0.0,
+        open_prices={}, voo_price=550.0,
+    )
+    # VOO +10% from the 500 anchor => same-dollar VOO nav 1650
+    assert e2.voo_nav == pytest.approx(1650.0)
+
+
+def test_record_cashbook_handles_missing_voo_price() -> None:
+    store = Storage.in_memory()
+    book = PaperBook(store, budget=1500.0)
+    entry = jobs.record_cashbook(
+        book, store, on=date(2024, 1, 3), regime_label="NEUTRAL", exposure_pct=0.0,
+        open_prices={}, voo_price=None,
+    )
+    # No benchmark data => VOO nav degrades to the budget, nothing crashes.
+    assert entry.voo_nav == pytest.approx(1500.0)
+    assert entry.total_nav == pytest.approx(1500.0)
+
+
 def test_is_trading_day_excludes_weekends_and_holidays() -> None:
     assert jobs.is_trading_day(date(2024, 1, 6)) is False  # Saturday
     assert jobs.is_trading_day(date(2024, 1, 1)) is False  # New Year's Day (holiday)

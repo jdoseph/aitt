@@ -26,7 +26,7 @@ from src.core.data import DataFetchError, fetch_many, fetch_prices
 from src.core.execution import BUY, SELL, Side, check_gap, slippage_bps
 from src.core.paper_trades import PaperBook
 from src.core.signals import CycleResult, SignalEngine
-from src.core.storage import PaperTrade, Storage
+from src.core.storage import CashbookEntry, PaperTrade, Storage
 from src.core.watchlist import load_watchlist
 
 # A daily exit's priority order (lower index = higher priority).
@@ -421,11 +421,52 @@ def _daily_exit_reason(
     return ""
 
 
+def record_cashbook(
+    book: PaperBook,
+    store: Storage,
+    *,
+    on: Date,
+    regime_label: str,
+    exposure_pct: float,
+    open_prices: dict[str, float],
+    voo_price: float | None,
+) -> CashbookEntry:
+    """Persist the day's paper-account snapshot for the NAV-vs-VOO equity curve.
+
+    The VOO benchmark anchors on the first recorded day (so it starts at the
+    budget); a missing benchmark price degrades the VOO nav to the budget rather
+    than crashing the cycle.
+    """
+    invested = book.invested_value(open_prices)
+    total_nav = book.current_nav(open_prices)
+    cash_end = total_nav - invested
+    prev = store.latest_cashbook()
+    cash_start = prev.cash_end if prev is not None else book.budget
+    if voo_price and voo_price > 0:
+        voo_nav = book.voo_nav_since_start(voo_price)
+        voo_px = voo_price
+    else:
+        voo_nav = book.budget
+        voo_px = 0.0
+    return store.upsert_cashbook(
+        date=on,
+        cash_start=cash_start,
+        cash_end=cash_end,
+        invested_value=invested,
+        total_nav=total_nav,
+        voo_nav=voo_nav,
+        voo_price=voo_px,
+        regime=regime_label,
+        exposure_pct=exposure_pct,
+    )
+
+
 def daily_eval(store: Storage | None = None, *, fetch: bool = True) -> CycleResult:
     """The daily-close job: run the signal cycle, then queue paper entries + exits.
 
     Entries become PENDING for the next open; daily exits flag OPEN positions for
-    a next-open close. Intraday stop/target hits are handled by the monitor.
+    a next-open close. Intraday stop/target hits are handled by the monitor. A
+    daily cashbook snapshot is persisted for the NAV-vs-VOO equity curve.
     """
     store = store or Storage()
     result = run_once(store, fetch=fetch)
@@ -435,7 +476,26 @@ def daily_eval(store: Storage | None = None, *, fetch: bool = True) -> CycleResu
             book, store, on=result.bar_date, regime_label=result.regime_label
         )
         queue_entries(book, store, on=result.bar_date, regime_label=result.regime_label)
+        open_prices = {
+            t.ticker: px
+            for t in book.open_trades()
+            if (px := _latest_close(store, t.ticker)) is not None
+        }
+        record_cashbook(
+            book,
+            store,
+            on=result.bar_date,
+            regime_label=result.regime_label,
+            exposure_pct=result.exposure,
+            open_prices=open_prices,
+            voo_price=_benchmark_price(),
+        )
     return result
+
+
+def _benchmark_price() -> float | None:
+    """Latest close for the portfolio benchmark (VOO), or None if unavailable."""
+    return execution.get_current_price(settings.portfolio_benchmark)
 
 
 def daily_summary(store: Storage | None = None, *, on: Date | None = None) -> str:
@@ -456,6 +516,7 @@ def daily_summary(store: Storage | None = None, *, on: Date | None = None) -> st
         open_count=len(book.open_trades()),
         closed_today=len(closed_today),
         realized_today=realized,
+        pending=len(book.pending_trades()),
     )
     return line
 

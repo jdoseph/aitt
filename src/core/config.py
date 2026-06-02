@@ -164,7 +164,9 @@ class Settings(BaseSettings):
     )
 
     # --- Session 13: portfolio exposure management (paper-only) ---
-    paper_start_balance: float = 5000.0
+    # Kept in sync with the Session 15 paper_budget so both subsystems report one
+    # consistent NAV.
+    paper_start_balance: float = 1500.0
     # Regime → total invested fraction (0.0-1.0). The cash option the index lacks.
     target_exposure_on: float = 1.0
     target_exposure_neutral: float = 0.6

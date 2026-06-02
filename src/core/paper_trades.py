@@ -83,6 +83,24 @@ class PaperBook:
             return self.budget
         return self.budget * (voo_current_price / voo_start_price)
 
+    def voo_start_price(self) -> float | None:
+        """The VOO close recorded on the first cashbook day — the benchmark anchor."""
+        for entry in self.storage.get_cashbook():  # oldest → newest
+            if entry.voo_price > 0:
+                return entry.voo_price
+        return None
+
+    def voo_nav_since_start(self, current_voo_price: float) -> float:
+        """Same-dollar VOO benchmark from the first recorded day to now.
+
+        Before any cashbook exists the anchor is ``current_voo_price`` itself, so
+        the benchmark starts exactly at the budget (no day-zero drift).
+        """
+        start = self.voo_start_price()
+        if start is None:
+            start = current_voo_price
+        return self.voo_nav(start, current_voo_price)
+
     # --- sizing ----------------------------------------------------------- #
     def size_position(self, composite_score: float) -> float:
         """Budget-constrained conviction size in dollars (0 when cash is too thin).

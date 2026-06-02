@@ -198,14 +198,21 @@ def format_trade_closed(t: PaperTrade) -> str:
 
 
 def format_daily_summary(
-    *, nav: float, budget: float, open_count: int, closed_today: int, realized_today: float
+    *,
+    nav: float,
+    budget: float,
+    open_count: int,
+    closed_today: int,
+    realized_today: float,
+    pending: int = 0,
 ) -> str:
     pnl = nav - budget
     sign = "+" if pnl >= 0 else ""
     rsign = "+" if realized_today >= 0 else ""
+    queued = f"{pending} queued · " if pending else ""
     return (
         f"📊 Paper EOD — NAV ${nav:,.0f} ({sign}${pnl:,.0f} vs ${budget:,.0f}) · "
-        f"{open_count} open · {closed_today} closed today ({rsign}${realized_today:,.0f})"
+        f"{open_count} open · {queued}{closed_today} closed today ({rsign}${realized_today:,.0f})"
     )
 
 
@@ -224,11 +231,17 @@ def notify_trade_closed(t: PaperTrade) -> str:
 
 
 def notify_daily_summary(
-    *, nav: float, budget: float, open_count: int, closed_today: int, realized_today: float
+    *,
+    nav: float,
+    budget: float,
+    open_count: int,
+    closed_today: int,
+    realized_today: float,
+    pending: int = 0,
 ) -> str:
     line = format_daily_summary(
         nav=nav, budget=budget, open_count=open_count,
-        closed_today=closed_today, realized_today=realized_today,
+        closed_today=closed_today, realized_today=realized_today, pending=pending,
     )
     logger.info(line)
     _desktop_best_effort("📊 Paper EOD summary", line)

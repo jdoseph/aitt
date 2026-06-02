@@ -113,6 +113,18 @@ def test_budget_never_exceeded_across_multiple_pendings(book: PaperBook) -> None
     assert book.size_position(100.0) <= book.available_cash()
 
 
+def test_voo_nav_since_start_anchors_on_first_recorded_day(storage: Storage) -> None:
+    book = PaperBook(storage, budget=1500.0)
+    # No cashbook yet: the anchor is the current price, so VOO nav == budget.
+    assert book.voo_nav_since_start(500.0) == pytest.approx(1500.0)
+    storage.upsert_cashbook(
+        date=date(2024, 1, 3), cash_start=1500.0, cash_end=1500.0, invested_value=0.0,
+        total_nav=1500.0, voo_nav=1500.0, regime="RISK_ON", exposure_pct=0.0, voo_price=500.0,
+    )
+    # Anchored at 500: a 600 close is +20% => same-dollar VOO nav 1800.
+    assert book.voo_nav_since_start(600.0) == pytest.approx(1800.0)
+
+
 def test_close_records_gap_note(book: PaperBook) -> None:
     t = _pending(book)
     book.execute_pending(t, open_price=100.0, slippage_bps=0.0, on=date(2024, 1, 3))
