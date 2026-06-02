@@ -16,6 +16,7 @@ from src.dashboard.pages import (
     alerts,
     backtest,
     chart,
+    options,
     overview,
     portfolio,
     trades,
@@ -54,6 +55,7 @@ def main() -> None:
             st.Page(value_chain.render, title="Value Chain", icon="🔗", url_path="value_chain"),
             st.Page(portfolio.render, title="Portfolio", icon="💼", url_path="portfolio"),
             st.Page(trades.render, title="Paper Trades", icon="🤖", url_path="trades"),
+            st.Page(options.render, title="Option Trades", icon="📐", url_path="options"),
             st.Page(backtest.render, title="Backtest", icon="📉", url_path="backtest"),
             st.Page(alerts.render, title="Alerts", icon="🔔", url_path="alerts"),
         ]
