@@ -160,6 +160,126 @@ class PortfolioSnapshot(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_utcnow)
 
 
+class PaperTrade(SQLModel, table=True):
+    """One simulated trade in the autonomous paper engine (Session 15).
+
+    Lifecycle: PENDING (queued at daily close) → OPEN (filled at next open) →
+    CLOSED (stop/target/daily-exit). ``signal_snapshot_json`` freezes the full
+    decision state at queue time so the trade journal can show *why* it opened.
+    All fake money — never routed to a broker.
+    """
+
+    __tablename__ = "paper_trades"
+
+    trade_id: Optional[int] = Field(default=None, primary_key=True)
+    ticker: str = Field(index=True)
+    strategy: str = ""
+    entry_signal_id: Optional[int] = None
+    status: str = Field(default="PENDING", index=True)  # PENDING | OPEN | CLOSED
+    # entry
+    entry_date: Optional[Date] = None
+    entry_price: float = 0.0  # fill incl. slippage
+    entry_slippage_bps: float = 0.0
+    # exit
+    exit_date: Optional[Date] = None
+    exit_price: float = 0.0  # fill incl. slippage
+    exit_slippage_bps: float = 0.0
+    exit_reason: str = ""  # EXIT_STOP | EXIT_TARGET | EXIT_EMA | EXIT_REGIME | ...
+    pending_exit_reason: str = ""  # a daily exit queued for next open (while still OPEN)
+    # sizing / levels
+    shares: float = 0.0
+    cost_basis: float = 0.0  # planned $ at PENDING; actual shares*entry at OPEN
+    stop_price: float = 0.0
+    target_price: float = 0.0
+    # outcome
+    pnl_dollars: float = 0.0
+    pnl_pct: float = 0.0
+    holding_days: int = 0
+    gap_note: str = ""  # set when gap protection moved a fill off its expected price
+    signal_snapshot_json: str = ""  # immutable decision snapshot
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class CashbookEntry(SQLModel, table=True):
+    """A daily paper-account snapshot for the NAV-vs-VOO equity curve (Session 15)."""
+
+    __tablename__ = "portfolio_cashbook"
+
+    date: Date = Field(primary_key=True)
+    cash_start: float = 0.0
+    cash_end: float = 0.0
+    invested_value: float = 0.0
+    total_nav: float = 0.0
+    voo_nav: float = 0.0  # same-dollar VOO benchmark value
+    voo_price: float = 0.0  # raw VOO close (lets the curve re-index from any start)
+    regime: str = ""
+    exposure_pct: float = 0.0
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class OptionTrade(SQLModel, table=True):
+    """One simulated long-call trade in the options engine (Session 16).
+
+    Lifecycle PENDING→OPEN→CLOSED mirrors PaperTrade. Premiums are per-share;
+    P&L = (exit_premium - entry_premium) * contracts * multiplier. ``price_source``
+    records whether the entry fill came from the live chain or the model.
+    """
+
+    __tablename__ = "option_trades"
+
+    trade_id: Optional[int] = Field(default=None, primary_key=True)
+    ticker: str = Field(index=True)
+    strategy: str = ""
+    status: str = Field(default="PENDING", index=True)  # PENDING | OPEN | CLOSED
+    # contract
+    option_type: str = "call"
+    strike: float = 0.0
+    expiry: Optional[Date] = None
+    dte_at_entry: int = 0
+    contracts: int = 0
+    multiplier: int = 100
+    entry_iv: float = 0.0
+    entry_delta: float = 0.0
+    price_source: str = ""  # "chain" | "model"
+    # entry
+    entry_date: Optional[Date] = None
+    entry_premium: float = 0.0  # per share, incl. slippage
+    underlying_entry: float = 0.0
+    # exit
+    exit_date: Optional[Date] = None
+    exit_premium: float = 0.0
+    exit_reason: str = ""
+    pending_exit_reason: str = ""
+    underlying_exit: float = 0.0
+    # levels carried from the dossier (on the underlying) + premium-based guards
+    underlying_stop: float = 0.0
+    underlying_target: float = 0.0
+    tp_premium: float = 0.0  # absolute premium take-profit level
+    sl_premium: float = 0.0  # absolute premium stop level
+    # accounting
+    cost_basis: float = 0.0  # contracts * entry_premium * multiplier (planned at PENDING)
+    pnl_dollars: float = 0.0
+    pnl_pct: float = 0.0
+    holding_days: int = 0
+    gap_note: str = ""
+    signal_snapshot_json: str = ""
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class OptionCashbook(SQLModel, table=True):
+    """A daily options-account snapshot for the NAV-vs-VOO curve (Session 16)."""
+
+    __tablename__ = "option_cashbook"
+
+    date: Date = Field(primary_key=True)
+    total_nav: float = 0.0
+    voo_nav: float = 0.0
+    voo_price: float = 0.0
+    invested_value: float = 0.0
+    regime: str = ""
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class AlertRecord(SQLModel, table=True):
     """A fired alert (a noteworthy signal transition)."""
 
@@ -604,4 +724,135 @@ class Storage:
         with self.session() as s:
             return s.exec(
                 select(PortfolioSnapshot).order_by(col(PortfolioSnapshot.date).desc())
+            ).first()
+
+    # --- paper trades (Session 15) ---------------------------------------- #
+    def add_paper_trade(self, trade: PaperTrade) -> PaperTrade:
+        """Insert a new paper trade and return it with its assigned ``trade_id``."""
+        trade.ticker = trade.ticker.upper()
+        with self.session() as s:
+            s.add(trade)
+            s.commit()
+            s.refresh(trade)
+            return trade
+
+    def update_paper_trade(self, trade: PaperTrade) -> PaperTrade:
+        """Persist mutations to an existing paper trade (merge by primary key)."""
+        with self.session() as s:
+            merged = s.merge(trade)
+            s.commit()
+            s.refresh(merged)
+            return merged
+
+    def get_paper_trade(self, trade_id: int) -> PaperTrade | None:
+        with self.session() as s:
+            return s.get(PaperTrade, trade_id)
+
+    def get_paper_trades(self, status: str | None = None) -> list[PaperTrade]:
+        """All paper trades (optionally filtered by status), oldest → newest."""
+        with self.session() as s:
+            stmt = select(PaperTrade)
+            if status is not None:
+                stmt = stmt.where(PaperTrade.status == status)
+            return list(s.exec(stmt.order_by(col(PaperTrade.trade_id))).all())
+
+    # --- cashbook (Session 15) -------------------------------------------- #
+    def upsert_cashbook(
+        self,
+        *,
+        date: Date,
+        cash_start: float,
+        cash_end: float,
+        invested_value: float,
+        total_nav: float,
+        voo_nav: float,
+        regime: str,
+        exposure_pct: float,
+        voo_price: float = 0.0,
+    ) -> CashbookEntry:
+        """Upsert a day's cashbook snapshot (keyed by date)."""
+        with self.session() as s:
+            rec = s.get(CashbookEntry, date) or CashbookEntry(date=date)
+            rec.cash_start = cash_start
+            rec.cash_end = cash_end
+            rec.invested_value = invested_value
+            rec.total_nav = total_nav
+            rec.voo_nav = voo_nav
+            rec.voo_price = voo_price
+            rec.regime = regime
+            rec.exposure_pct = exposure_pct
+            rec.created_at = _utcnow()
+            s.merge(rec)
+            s.commit()
+            return rec
+
+    def get_cashbook(self) -> list[CashbookEntry]:
+        """All cashbook snapshots, oldest → newest (for the equity curve)."""
+        with self.session() as s:
+            return list(s.exec(select(CashbookEntry).order_by(col(CashbookEntry.date))).all())
+
+    def latest_cashbook(self) -> CashbookEntry | None:
+        with self.session() as s:
+            return s.exec(
+                select(CashbookEntry).order_by(col(CashbookEntry.date).desc())
+            ).first()
+
+    # --- option trades (Session 16) --------------------------------------- #
+    def add_option_trade(self, trade: OptionTrade) -> OptionTrade:
+        trade.ticker = trade.ticker.upper()
+        with self.session() as s:
+            s.add(trade)
+            s.commit()
+            s.refresh(trade)
+            return trade
+
+    def update_option_trade(self, trade: OptionTrade) -> OptionTrade:
+        with self.session() as s:
+            merged = s.merge(trade)
+            s.commit()
+            s.refresh(merged)
+            return merged
+
+    def get_option_trade(self, trade_id: int) -> OptionTrade | None:
+        with self.session() as s:
+            return s.get(OptionTrade, trade_id)
+
+    def get_option_trades(self, status: str | None = None) -> list[OptionTrade]:
+        with self.session() as s:
+            stmt = select(OptionTrade)
+            if status is not None:
+                stmt = stmt.where(OptionTrade.status == status)
+            return list(s.exec(stmt.order_by(col(OptionTrade.trade_id))).all())
+
+    # --- option cashbook (Session 16) ------------------------------------- #
+    def upsert_option_cashbook(
+        self,
+        *,
+        date: Date,
+        total_nav: float,
+        voo_nav: float,
+        invested_value: float,
+        regime: str,
+        voo_price: float = 0.0,
+    ) -> OptionCashbook:
+        with self.session() as s:
+            rec = s.get(OptionCashbook, date) or OptionCashbook(date=date)
+            rec.total_nav = total_nav
+            rec.voo_nav = voo_nav
+            rec.voo_price = voo_price
+            rec.invested_value = invested_value
+            rec.regime = regime
+            rec.created_at = _utcnow()
+            s.merge(rec)
+            s.commit()
+            return rec
+
+    def get_option_cashbook(self) -> list[OptionCashbook]:
+        with self.session() as s:
+            return list(s.exec(select(OptionCashbook).order_by(col(OptionCashbook.date))).all())
+
+    def latest_option_cashbook(self) -> OptionCashbook | None:
+        with self.session() as s:
+            return s.exec(
+                select(OptionCashbook).order_by(col(OptionCashbook.date).desc())
             ).first()

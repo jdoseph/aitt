@@ -90,6 +90,16 @@ tickers:
     layer: layer3
     notes: "Power management, 800 VDC partner (ADR)"
     capex_exposure: 50
+  - ticker: TSM
+    name: Taiwan Semiconductor
+    layer: layer3
+    notes: "Foundry fabricating virtually every AI accelerator (NVDA/AMD/AVGO); CoWoS bottleneck"
+    capex_exposure: 95
+  - ticker: AMAT
+    name: Applied Materials
+    layer: layer3
+    notes: "Semiconductor fab equipment; picks-and-shovels for HBM/logic capacity ramp"
+    capex_exposure: 75
 
   # --- Layer 4: Networking & Interconnects ---
   - ticker: ANET
@@ -164,6 +174,11 @@ tickers:
     layer: layer5
     notes: "Grid construction / electrical contracting"
     capex_exposure: 70
+  - ticker: CEG
+    name: Constellation Energy
+    layer: layer5
+    notes: "Nuclear power for data centers (Microsoft PPA); the AI power-bottleneck theme"
+    capex_exposure: 60
 
   # --- Layer 6: Cooling & Thermal ---
   - ticker: NVT
@@ -243,4 +258,9 @@ tickers:
     name: Meta Platforms
     layer: layer10
     notes: "600K+ GPUs, MTIA custom inference chip"
+    capex_exposure: 80
+  - ticker: ORCL
+    name: Oracle
+    layer: layer10
+    notes: "OCI AI cloud + OpenAI 'Stargate' buildout; major AI capex spender"
     capex_exposure: 80

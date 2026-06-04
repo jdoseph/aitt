@@ -15,6 +15,7 @@ from loguru import logger
 from src.core.config import Settings, settings
 from src.core.regime import RISK_OFF, RISK_ON
 from src.core.signals import Alert, CycleResult
+from src.core.storage import OptionTrade, PaperTrade
 
 _SEVERITY_PREFIX = {"entry": "🟢 ENTRY", "secondary": "🟡 DIP", "warning": "🔴 WARNING"}
 
@@ -142,3 +143,150 @@ def log_portfolio_summary(result: CycleResult) -> None:
         return
     for line in portfolio_summary_lines(result):
         logger.info(line)
+
+
+# --------------------------------------------------------------------------- #
+# Session 15 — paper-trade notifications (concise one-liners)
+# --------------------------------------------------------------------------- #
+_EXIT_ICON = {
+    "EXIT_STOP": "🛑 STOP HIT",
+    "EXIT_TARGET": "🎯 TARGET HIT",
+    "EXIT_EMA": "📉 50-EMA LOST",
+    "EXIT_REGIME": "🔻 REGIME EXIT",
+    "EXIT_ROTATION": "🔄 ROTATED OUT",
+    "EXIT_TIME": "⏲ TIME STOP",
+    "EXIT_QUALITY": "⚠ QUALITY EXIT",
+}
+
+
+def _desktop_best_effort(title: str, body: str) -> None:
+    """Fire a desktop toast, degrading to a logged warning on any backend error."""
+    if not settings.alert_desktop:
+        return
+    try:
+        from plyer import notification
+
+        notification.notify(
+            title=title[:64], message=body[:240], app_name=DesktopNotifier.APP_NAME, timeout=12
+        )
+    except Exception as exc:  # noqa: BLE001 - desktop backend is best-effort
+        logger.warning("desktop notification failed ({}): {}", type(exc).__name__, exc)
+
+
+def format_trade_opened(t: PaperTrade) -> str:
+    levels = ""
+    if t.stop_price:
+        levels += f" · stop ${t.stop_price:,.2f}"
+    if t.target_price:
+        levels += f" · target ${t.target_price:,.2f}"
+    return (
+        f"📈 OPENED {t.ticker}: {t.shares:.2f}sh @ ${t.entry_price:,.2f} "
+        f"(${t.cost_basis:,.0f}){levels}"
+    )
+
+
+def format_trade_closed(t: PaperTrade) -> str:
+    icon = _EXIT_ICON.get(t.exit_reason, t.exit_reason or "CLOSED")
+    sign = "+" if t.pnl_dollars >= 0 else ""
+    line = (
+        f"{icon} {t.ticker}: {sign}${t.pnl_dollars:,.0f} ({sign}{t.pnl_pct:.1f}%) "
+        f"in {t.holding_days}d @ ${t.exit_price:,.2f}"
+    )
+    if t.gap_note:
+        line += f" ⚠ {t.gap_note}"
+    return line
+
+
+def format_daily_summary(
+    *,
+    nav: float,
+    budget: float,
+    open_count: int,
+    closed_today: int,
+    realized_today: float,
+    pending: int = 0,
+) -> str:
+    pnl = nav - budget
+    sign = "+" if pnl >= 0 else ""
+    rsign = "+" if realized_today >= 0 else ""
+    queued = f"{pending} queued · " if pending else ""
+    return (
+        f"📊 Paper EOD — NAV ${nav:,.0f} ({sign}${pnl:,.0f} vs ${budget:,.0f}) · "
+        f"{open_count} open · {queued}{closed_today} closed today ({rsign}${realized_today:,.0f})"
+    )
+
+
+def notify_trade_opened(t: PaperTrade) -> str:
+    line = format_trade_opened(t)
+    logger.info(line)
+    _desktop_best_effort(f"📈 {t.ticker} opened", line)
+    return line
+
+
+def notify_trade_closed(t: PaperTrade) -> str:
+    line = format_trade_closed(t)
+    logger.info(line)
+    _desktop_best_effort(f"{t.ticker} closed", line)
+    return line
+
+
+def notify_daily_summary(
+    *,
+    nav: float,
+    budget: float,
+    open_count: int,
+    closed_today: int,
+    realized_today: float,
+    pending: int = 0,
+) -> str:
+    line = format_daily_summary(
+        nav=nav, budget=budget, open_count=open_count,
+        closed_today=closed_today, realized_today=realized_today, pending=pending,
+    )
+    logger.info(line)
+    _desktop_best_effort("📊 Paper EOD summary", line)
+    return line
+
+
+# --------------------------------------------------------------------------- #
+# Session 16 — option-trade notifications
+# --------------------------------------------------------------------------- #
+_OPT_EXIT_ICON = {
+    "EXIT_STOP": "🛑 STOP",
+    "EXIT_TARGET": "🎯 TARGET",
+    "EXIT_OPT_TP": "🎯 +PREM",
+    "EXIT_OPT_SL": "🛑 -PREM",
+    "EXIT_DTE": "⏲ DTE",
+    "EXIT_EXPIRY": "📅 EXPIRY",
+}
+
+
+def format_option_opened(t: OptionTrade) -> str:
+    exp = t.expiry.isoformat() if t.expiry else "?"
+    return (
+        f"📈 OPENED {t.ticker} {t.strike:g}C {exp}: {t.contracts}x @ ${t.entry_premium:,.2f} "
+        f"(${t.cost_basis:,.0f}, {t.price_source})"
+    )
+
+
+def format_option_closed(t: OptionTrade) -> str:
+    icon = _OPT_EXIT_ICON.get(t.exit_reason, t.exit_reason or "CLOSED")
+    sign = "+" if t.pnl_dollars >= 0 else ""
+    return (
+        f"{icon} {t.ticker} {t.strike:g}C: {sign}${t.pnl_dollars:,.0f} "
+        f"({sign}{t.pnl_pct:.1f}%) in {t.holding_days}d"
+    )
+
+
+def notify_option_opened(t: OptionTrade) -> str:
+    line = format_option_opened(t)
+    logger.info(line)
+    _desktop_best_effort(f"📈 {t.ticker} call opened", line)
+    return line
+
+
+def notify_option_closed(t: OptionTrade) -> str:
+    line = format_option_closed(t)
+    logger.info(line)
+    _desktop_best_effort(f"{t.ticker} call closed", line)
+    return line

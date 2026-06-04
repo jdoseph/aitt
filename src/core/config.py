@@ -164,7 +164,9 @@ class Settings(BaseSettings):
     )
 
     # --- Session 13: portfolio exposure management (paper-only) ---
-    paper_start_balance: float = 5000.0
+    # Kept in sync with the Session 15 paper_budget so both subsystems report one
+    # consistent NAV.
+    paper_start_balance: float = 1500.0
     # Regime → total invested fraction (0.0-1.0). The cash option the index lacks.
     target_exposure_on: float = 1.0
     target_exposure_neutral: float = 0.6
@@ -190,6 +192,56 @@ class Settings(BaseSettings):
     cost_per_trade_bps: float = 10.0  # round-trip turnover cost (basis points)
     slippage_bps: float = 5.0  # additional slippage per unit of turnover (bps)
     trading_days_per_year: int = 252  # annualization factor for risk metrics
+
+    # --- Session 15: autonomous paper trading engine ---
+    enable_paper_trading: bool = True
+    paper_budget: float = 1500.0  # fake-money budget the engine trades within
+    paper_min_score: float = 55.0  # composite score floor to open a paper entry
+    paper_min_grade: str = "DECENT"  # scorecard grade floor to open a paper entry
+    min_position_size: float = 200.0  # smallest dollar position the engine will open
+    base_position_pct: float = 0.20  # base sizing fraction (scaled by composite/100)
+    # max_position_pct (0.25) from Session 13 is reused as the per-name budget cap.
+    monitor_interval_minutes: int = 5  # intraday stop/target surveillance cadence
+    time_stop_days: int = 30  # close a position held longer than this (EXIT_TIME)
+    paper_exit_rank: int = 12  # held name falling past this rank rotates out (EXIT_ROTATION)
+    paper_max_stop_pct: float = 0.0  # >0 enables a hard max stop this far below entry
+    # Slippage tiers (basis points) keyed by liquidity, plus a volume adjustment.
+    slippage_large_cap_usd: float = 50e9  # >= this market cap => large-cap tier
+    slippage_mid_cap_usd: float = 10e9  # >= this (and < large) => mid-cap tier
+    slippage_large_bps: float = 3.0
+    slippage_mid_bps: float = 7.0
+    slippage_small_bps: float = 12.0
+    slippage_volatile_entry_bps: float = 20.0
+    slippage_volatile_exit_bps: float = 25.0
+    # Names treated as micro/volatile regardless of market cap (wider slippage).
+    slippage_volatile_tickers: list[str] = Field(
+        default_factory=lambda: ["RDW", "LUNR", "ASTS", "RKLB"]
+    )
+    volume_slippage_pct: float = 0.01  # position > this fraction of ADV adds extra bps
+    volume_slippage_extra_bps: float = 5.0
+    # Market-open fill + intraday monitor windows (market-local time).
+    market_open_hhmm: str = "09:31"
+    monitor_start_hhmm: str = "09:35"
+    monitor_end_hhmm: str = "15:55"
+    daily_summary_hhmm: str = "16:30"
+
+    # --- Session 16: options expression layer ---
+    # "stock" trades only the S15 share book, "option" only the option book,
+    # "both" runs them in parallel against the same signals.
+    trade_instrument: str = "both"  # "stock" | "option" | "both"
+    enable_options: bool = True
+    option_structure: str = "long_call"  # only long calls in this session
+    option_target_delta: float = 0.60  # strike nearest this delta (slightly ITM)
+    option_target_dte: int = 45  # expiry nearest this many days to expiration
+    option_min_dte_exit: int = 21  # close at/under this DTE (theta/gamma cliff guard)
+    option_tp_pct: float = 50.0  # take profit at +this% of entry premium
+    option_sl_pct: float = 50.0  # stop at -this% of entry premium
+    risk_free_rate: float = 0.04  # annualized, for Black-Scholes
+    option_iv_premium_mult: float = 1.1  # realized-vol proxy is scaled by this
+    realized_vol_window: int = 20  # trading days for the realized-vol estimate
+    option_slippage_bps_model: float = 50.0  # slippage when a fill is model-priced
+    option_chain_min_oi: int = 10  # min open interest for a live chain to be "usable"
+    option_multiplier: int = 100  # shares per contract
 
     # --- alerts ---
     min_confidence_stars: int = 1
@@ -226,6 +278,27 @@ class Settings(BaseSettings):
     @property
     def eod_eval_minute(self) -> int:
         return int(self.eod_eval_hhmm.split(":")[1])
+
+    @staticmethod
+    def _hhmm(value: str) -> tuple[int, int]:
+        h, m = value.split(":")
+        return int(h), int(m)
+
+    @property
+    def market_open_hm(self) -> tuple[int, int]:
+        return self._hhmm(self.market_open_hhmm)
+
+    @property
+    def monitor_start_hm(self) -> tuple[int, int]:
+        return self._hhmm(self.monitor_start_hhmm)
+
+    @property
+    def monitor_end_hm(self) -> tuple[int, int]:
+        return self._hhmm(self.monitor_end_hhmm)
+
+    @property
+    def daily_summary_hm(self) -> tuple[int, int]:
+        return self._hhmm(self.daily_summary_hhmm)
 
     @property
     def file_logging_enabled(self) -> bool:
